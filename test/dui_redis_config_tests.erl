@@ -170,3 +170,19 @@ default_templates_test() ->
     Names = [maps:get(name, T) || T <- Templates],
     ?assert(lists:member(<<"Session">>, Names)),
     cleanup(Dir).
+
+groups_test() ->
+    Dir = mk_tmp(),
+    Path = filename:join(Dir, "config.json"),
+    ?assertEqual({ok, []}, dui_redis_config:list_groups(Path)),
+    {ok, G} = dui_redis_config:add_group(Path, <<"Local">>, <<"#fff">>),
+    ?assertEqual(<<"Local">>, maps:get(name, G)),
+    ok = dui_redis_config:add_connection_to_group(Path, <<"Local">>, 1),
+    {ok, [G1]} = dui_redis_config:list_groups(Path),
+    ?assertEqual([1], maps:get(connections, G1)),
+    ok = dui_redis_config:remove_connection_from_group(Path, <<"Local">>, 1),
+    {ok, [G2]} = dui_redis_config:list_groups(Path),
+    ?assertEqual([], maps:get(connections, G2)),
+    ok = dui_redis_config:delete_group(Path, <<"Local">>),
+    ?assertEqual({ok, []}, dui_redis_config:list_groups(Path)),
+    cleanup(Dir).

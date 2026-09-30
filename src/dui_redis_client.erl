@@ -24,6 +24,9 @@
     scan_regex/2, fuzzy_search/2, search_by_value/3, compare_keys/2, json_get_path/2,
     server_info/0, memory_stats/0, slow_log/1, client_list/0, live_metrics/0,
     expiring_keys/1,
+    publish/2, pubsub_channels/1, config_get/1, config_set/2, eval_script/1,
+    bulk_delete/1, batch_set_ttl/2, cluster_nodes/0, cluster_info/0,
+    export_to_file/2, import_from_file/1,
     build_options/1, stop/0
 ]).
 
@@ -220,6 +223,50 @@ live_metrics() -> call(live_metrics).
 -spec expiring_keys(pos_integer()) -> {ok, [map()]} | {error, term()}.
 expiring_keys(Threshold) -> call({expiring_keys, Threshold}, ?SCAN_TIMEOUT).
 
+%% @doc PUBLISHes `Message' to `Channel'; returns the receiver count.
+-spec publish(binary(), binary()) -> {ok, integer()} | {error, term()}.
+publish(Channel, Message) -> call({publish, Channel, Message}).
+
+%% @doc Lists active pub/sub channels matching `Pattern'.
+-spec pubsub_channels(binary()) -> {ok, [binary()]} | {error, term()}.
+pubsub_channels(Pattern) -> call({pubsub_channels, Pattern}).
+
+%% @doc Returns CONFIG GET results as a map.
+-spec config_get(binary()) -> {ok, map()} | {error, term()}.
+config_get(Pattern) -> call({config_get, Pattern}).
+
+%% @doc Sets a CONFIG parameter.
+-spec config_set(binary(), binary()) -> ok | {error, term()}.
+config_set(Param, Value) -> call({config_set, Param, Value}).
+
+%% @doc Runs a Lua script with no keys/args.
+-spec eval_script(binary()) -> {ok, term()} | {error, term()}.
+eval_script(Script) -> call({eval_script, Script}).
+
+%% @doc Deletes all keys matching `Pattern'; returns the deleted count.
+-spec bulk_delete(binary()) -> {ok, integer()} | {error, term()}.
+bulk_delete(Pattern) -> call({bulk_delete, Pattern}, ?SCAN_TIMEOUT).
+
+%% @doc Sets a TTL on all keys matching `Pattern'; returns the count.
+-spec batch_set_ttl(binary(), integer()) -> {ok, integer()} | {error, term()}.
+batch_set_ttl(Pattern, Ttl) -> call({batch_set_ttl, Pattern, Ttl}, ?SCAN_TIMEOUT).
+
+%% @doc Returns parsed CLUSTER NODES.
+-spec cluster_nodes() -> {ok, [map()]} | {error, term()}.
+cluster_nodes() -> call(cluster_nodes).
+
+%% @doc Returns parsed CLUSTER INFO.
+-spec cluster_info() -> {ok, map()} | {error, term()}.
+cluster_info() -> call(cluster_info).
+
+%% @doc Exports keys matching `Pattern' to a JSON file.
+-spec export_to_file(binary(), string() | binary()) -> {ok, integer()} | {error, term()}.
+export_to_file(Pattern, Filename) -> call({export_to_file, Pattern, Filename}, ?SCAN_TIMEOUT).
+
+%% @doc Imports keys from a JSON file.
+-spec import_from_file(string() | binary()) -> {ok, integer()} | {error, term()}.
+import_from_file(Filename) -> call({import_from_file, Filename}, ?SCAN_TIMEOUT).
+
 -spec stop() -> ok.
 stop() -> gen_server:stop(?SERVER).
 
@@ -303,6 +350,28 @@ handle_call(live_metrics, _From, State) ->
     {reply, with_conn(State, fun do_live_metrics/1), State};
 handle_call({expiring_keys, Threshold}, _From, State) ->
     {reply, with_conn(State, fun(Pid) -> do_expiring_keys(Pid, Threshold) end), State};
+handle_call({publish, Channel, Message}, _From, State) ->
+    {reply, with_conn(State, fun(Pid) -> do_publish(Pid, Channel, Message) end), State};
+handle_call({pubsub_channels, Pattern}, _From, State) ->
+    {reply, with_conn(State, fun(Pid) -> do_pubsub_channels(Pid, Pattern) end), State};
+handle_call({config_get, Pattern}, _From, State) ->
+    {reply, with_conn(State, fun(Pid) -> do_config_get(Pid, Pattern) end), State};
+handle_call({config_set, Param, Value}, _From, State) ->
+    {reply, with_conn(State, fun(Pid) -> do_config_set(Pid, Param, Value) end), State};
+handle_call({eval_script, Script}, _From, State) ->
+    {reply, with_conn(State, fun(Pid) -> do_eval_script(Pid, Script) end), State};
+handle_call({bulk_delete, Pattern}, _From, State) ->
+    {reply, with_conn(State, fun(Pid) -> do_bulk_delete(Pid, Pattern) end), State};
+handle_call({batch_set_ttl, Pattern, Ttl}, _From, State) ->
+    {reply, with_conn(State, fun(Pid) -> do_batch_set_ttl(Pid, Pattern, Ttl) end), State};
+handle_call(cluster_nodes, _From, State) ->
+    {reply, with_conn(State, fun do_cluster_nodes/1), State};
+handle_call(cluster_info, _From, State) ->
+    {reply, with_conn(State, fun do_cluster_info/1), State};
+handle_call({export_to_file, Pattern, Filename}, _From, State) ->
+    {reply, with_conn(State, fun(Pid) -> do_export_to_file(Pid, Pattern, Filename) end), State};
+handle_call({import_from_file, Filename}, _From, State) ->
+    {reply, with_conn(State, fun(Pid) -> do_import_from_file(Pid, Filename) end), State};
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
@@ -982,6 +1051,216 @@ fnum(Key, Info) ->
         undefined -> 0.0;
         F -> F
     end.
+
+%% ---------------------------------------------------------------------------
+%% Ops / cluster / import-export
+%% ---------------------------------------------------------------------------
+
+-spec do_publish(pid(), binary(), binary()) -> {ok, integer()} | {error, term()}.
+do_publish(Pid, Channel, Message) ->
+    case eredis:q(Pid, [<<"PUBLISH">>, Channel, Message]) of
+        {ok, N} -> {ok, to_int(N, 0)};
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec do_pubsub_channels(pid(), binary()) -> {ok, [binary()]} | {error, term()}.
+do_pubsub_channels(Pid, Pattern) ->
+    case eredis:q(Pid, [<<"PUBSUB">>, <<"CHANNELS">>, Pattern]) of
+        {ok, Channels} when is_list(Channels) -> {ok, Channels};
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec do_config_get(pid(), binary()) -> {ok, map()} | {error, term()}.
+do_config_get(Pid, Pattern) ->
+    case eredis:q(Pid, [<<"CONFIG">>, <<"GET">>, Pattern]) of
+        {ok, Flat} when is_list(Flat) -> {ok, maps:from_list(pair_up(Flat))};
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec do_config_set(pid(), binary(), binary()) -> ok | {error, term()}.
+do_config_set(Pid, Param, Value) ->
+    case eredis:q(Pid, [<<"CONFIG">>, <<"SET">>, Param, Value]) of
+        {ok, _} -> ok;
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec do_eval_script(pid(), binary()) -> {ok, term()} | {error, term()}.
+do_eval_script(Pid, Script) ->
+    case eredis:q(Pid, [<<"EVAL">>, Script, <<"0">>]) of
+        {ok, V} -> {ok, V};
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec do_bulk_delete(pid(), binary()) -> {ok, integer()} | {error, term()}.
+do_bulk_delete(Pid, Pattern) ->
+    Keys = scan_all_keys(Pid, Pattern),
+    {ok, delete_chunked(Pid, Keys, 0)}.
+
+-spec delete_chunked(pid(), [binary()], integer()) -> integer().
+delete_chunked(_Pid, [], Acc) -> Acc;
+delete_chunked(Pid, Keys, Acc) ->
+    N = min(100, length(Keys)),
+    {Chunk, Rest} = lists:split(N, Keys),
+    Count = case eredis:q(Pid, [<<"DEL">> | Chunk]) of
+        {ok, V} -> to_int(V, 0);
+        _ -> 0
+    end,
+    delete_chunked(Pid, Rest, Acc + Count).
+
+-spec do_batch_set_ttl(pid(), binary(), integer()) -> {ok, integer()} | {error, term()}.
+do_batch_set_ttl(Pid, Pattern, Ttl) ->
+    Keys = lists:sublist(scan_all_keys(Pid, Pattern), 10000),
+    {ok, expire_chunked(Pid, Keys, Ttl, 0)}.
+
+-spec expire_chunked(pid(), [binary()], integer(), integer()) -> integer().
+expire_chunked(_Pid, [], _Ttl, Acc) -> Acc;
+expire_chunked(Pid, Keys, Ttl, Acc) ->
+    N = min(100, length(Keys)),
+    {Chunk, Rest} = lists:split(N, Keys),
+    Cmds = [case Ttl > 0 of
+                true -> [<<"EXPIRE">>, K, integer_to_binary(Ttl)];
+                false -> [<<"PERSIST">>, K]
+            end || K <- Chunk],
+    Count = case eredis:qp(Pid, Cmds) of
+        Results when is_list(Results) ->
+            length([1 || {ok, <<"1">>} <- Results]);
+        _ -> 0
+    end,
+    expire_chunked(Pid, Rest, Ttl, Acc + Count).
+
+-spec do_cluster_nodes(pid()) -> {ok, [map()]} | {error, term()}.
+do_cluster_nodes(Pid) ->
+    case eredis:q(Pid, [<<"CLUSTER">>, <<"NODES">>]) of
+        {ok, Bin} -> {ok, dui_redis_cluster:parse_nodes(Bin)};
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec do_cluster_info(pid()) -> {ok, map()} | {error, term()}.
+do_cluster_info(Pid) ->
+    case eredis:q(Pid, [<<"CLUSTER">>, <<"INFO">>]) of
+        {ok, Bin} -> {ok, dui_redis_cluster:parse_info(Bin)};
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec do_export_to_file(pid(), binary(), string() | binary()) ->
+    {ok, integer()} | {error, term()}.
+do_export_to_file(Pid, Pattern, Filename) ->
+    Exported = do_export(Pid, Pattern),
+    Bin = iolist_to_binary(json:encode(Exported)),
+    case file:write_file(to_list(Filename), Bin) of
+        ok -> {ok, maps:size(Exported)};
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec do_export(pid(), binary()) -> map().
+do_export(Pid, Pattern) ->
+    Keys = scan_all_keys(Pid, Pattern),
+    lists:foldl(
+        fun(K, Acc) ->
+            case do_value_detail(Pid, K) of
+                {ok, Value} ->
+                    Ttl = case eredis:q(Pid, [<<"TTL">>, K]) of
+                        {ok, T} -> to_int(T, -1);
+                        _ -> -1
+                    end,
+                    maps:put(K, dui_redis_export:encode(Value, Ttl), Acc);
+                _ -> Acc
+            end
+        end,
+        #{}, Keys).
+
+-spec do_import_from_file(pid(), string() | binary()) ->
+    {ok, integer()} | {error, term()}.
+do_import_from_file(Pid, Filename) ->
+    case file:read_file(to_list(Filename)) of
+        {ok, Bin} ->
+            try json:decode(Bin) of
+                Data when is_map(Data) -> do_import(Pid, Data);
+                _ -> {error, invalid_format}
+            catch
+                _:_ -> {error, invalid_json}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+-spec do_import(pid(), map()) -> {ok, integer()}.
+do_import(Pid, Data) ->
+    Count = maps:fold(
+        fun(Key, Meta, Acc) ->
+            case dui_redis_export:decode(Meta) of
+                {Type, Value, Ttl} ->
+                    case import_entry(Pid, Key, Type, Value, Ttl) of
+                        ok -> Acc + 1;
+                        _ -> Acc
+                    end;
+                error -> Acc
+            end
+        end,
+        0, Data),
+    {ok, Count}.
+
+-spec import_entry(pid(), binary(), atom(), term(), integer()) -> ok | {error, term()}.
+import_entry(Pid, Key, string, Value, Ttl) ->
+    _ = eredis:q(Pid, [<<"SET">>, Key, to_bin(Value)]),
+    apply_ttl(Pid, Key, Ttl);
+import_entry(Pid, Key, json, Value, Ttl) ->
+    _ = eredis:q(Pid, [<<"JSON.SET">>, Key, <<"$">>, to_bin(Value)]),
+    apply_ttl(Pid, Key, Ttl);
+import_entry(Pid, Key, list, Values, Ttl) when is_list(Values) ->
+    _ = eredis:q(Pid, [<<"RPUSH">>, Key | [to_bin(V) || V <- Values]]),
+    apply_ttl(Pid, Key, Ttl);
+import_entry(Pid, Key, set, Values, Ttl) when is_list(Values) ->
+    _ = eredis:q(Pid, [<<"SADD">>, Key | [to_bin(V) || V <- Values]]),
+    apply_ttl(Pid, Key, Ttl);
+import_entry(Pid, Key, zset, Values, Ttl) when is_list(Values) ->
+    Args = [<<"ZADD">>, Key | lists:flatmap(
+        fun(M) -> [number_bin(mget(M, <<"score">>, 0)), to_bin(mget(M, <<"member">>, <<>>))] end,
+        Values)],
+    _ = eredis:q(Pid, Args),
+    apply_ttl(Pid, Key, Ttl);
+import_entry(Pid, Key, geo, Values, Ttl) when is_list(Values) ->
+    Args = [<<"GEOADD">>, Key | lists:flatmap(
+        fun(M) -> [number_bin(mget(M, <<"lon">>, 0)), number_bin(mget(M, <<"lat">>, 0)),
+                   to_bin(mget(M, <<"member">>, <<>>))] end,
+        Values)],
+    _ = eredis:q(Pid, Args),
+    apply_ttl(Pid, Key, Ttl);
+import_entry(Pid, Key, hash, Value, Ttl) when is_map(Value) ->
+    Args = [<<"HSET">>, Key | lists:flatmap(
+        fun({F, V}) -> [to_bin(F), to_bin(V)] end, maps:to_list(Value))],
+    _ = eredis:q(Pid, Args),
+    apply_ttl(Pid, Key, Ttl);
+import_entry(Pid, Key, stream, Entries, Ttl) when is_list(Entries) ->
+    lists:foreach(
+        fun(E) ->
+            Id = to_bin(mget(E, <<"id">>, <<"*">>)),
+            Fields = mget(E, <<"fields">>, #{}),
+            Args = [<<"XADD">>, Key, Id | lists:flatmap(
+                fun({F, V}) -> [to_bin(F), to_bin(V)] end, maps:to_list(Fields))],
+            _ = eredis:q(Pid, Args)
+        end,
+        Entries),
+    apply_ttl(Pid, Key, Ttl);
+import_entry(_Pid, _Key, _Type, _Value, _Ttl) ->
+    {error, unsupported}.
+
+-spec apply_ttl(pid(), binary(), integer()) -> ok | {error, term()}.
+apply_ttl(Pid, Key, Ttl) when Ttl > 0 ->
+    case eredis:q(Pid, [<<"EXPIRE">>, Key, integer_to_binary(Ttl)]) of
+        {ok, _} -> ok;
+        {error, Reason} -> {error, Reason}
+    end;
+apply_ttl(_Pid, _Key, _Ttl) ->
+    ok.
+
+-spec mget(map(), binary(), term()) -> term().
+mget(Map, Key, Default) when is_map(Map) ->
+    case maps:find(Key, Map) of
+        {ok, V} -> V;
+        error -> maps:get(Key, Map, Default)
+    end;
+mget(_Map, _Key, Default) -> Default.
 
 %% ---------------------------------------------------------------------------
 %% Small helpers

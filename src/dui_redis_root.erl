@@ -267,6 +267,68 @@ update({expiring_loaded, {ok, Keys}}, State) ->
     {dui_redis_state:set_screen(S1, expiring_keys), []};
 update({expiring_loaded, {error, Reason}}, State) ->
     {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({channels_loaded, {ok, Channels}}, State) ->
+    S1 = dui_redis_state:set_channels(State, Channels),
+    {dui_redis_state:set_screen(S1, pubsub_channels), []};
+update({channels_loaded, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({published, Channel, {ok, N}}, State) ->
+    Msg = iolist_to_binary(io_lib:format("Published to ~s (~b receiver(s))", [Channel, N])),
+    S1 = dui_redis_state:set_screen(State, keys),
+    {dui_redis_state:set_status(S1, info, Msg), []};
+update({published, _Channel, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({lua_result, {ok, Value}}, State) ->
+    S1 = dui_redis_state:set_result_text(State, to_bin(Value)),
+    {dui_redis_state:set_screen(S1, result_text), []};
+update({lua_result, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({redis_config_loaded, {ok, Map}}, State) ->
+    Params = lists:sort(maps:to_list(Map)),
+    S1 = dui_redis_state:set_config_params(State, Params),
+    {dui_redis_state:set_screen(S1, redis_config), []};
+update({redis_config_loaded, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({config_set, Param, ok}, State) ->
+    Msg = <<"Updated ", Param/binary>>,
+    S1 = dui_redis_state:set_screen(State, redis_config),
+    S2 = dui_redis_state:set_status(S1, info, Msg),
+    {S2, [dui_redis_cmd:load_redis_config(State)]};
+update({config_set, _Param, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({cluster_loaded, {ok, Nodes}}, State) ->
+    S1 = dui_redis_state:set_cluster_nodes(State, Nodes),
+    {dui_redis_state:set_screen(S1, cluster_info), []};
+update({cluster_loaded, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({export_done, {ok, N}}, State) ->
+    Msg = iolist_to_binary(io_lib:format("Exported ~b key(s)", [N])),
+    {dui_redis_state:set_status(State, info, Msg), []};
+update({export_done, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({import_done, {ok, N}}, State) ->
+    Msg = iolist_to_binary(io_lib:format("Imported ~b key(s)", [N])),
+    S1 = dui_redis_state:set_status(State, info, Msg),
+    reload_keys(S1);
+update({import_done, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({bulk_deleted, {ok, N}}, State) ->
+    Msg = iolist_to_binary(io_lib:format("Deleted ~b key(s)", [N])),
+    S1 = dui_redis_state:set_status(State, info, Msg),
+    reload_keys(S1);
+update({bulk_deleted, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({batch_ttl_done, {ok, N}}, State) ->
+    Msg = iolist_to_binary(io_lib:format("Set TTL on ~b key(s)", [N])),
+    S1 = dui_redis_state:set_status(State, info, Msg),
+    reload_keys(S1);
+update({batch_ttl_done, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({groups_loaded, {ok, Groups}}, State) ->
+    S1 = dui_redis_state:set_groups(State, Groups),
+    {dui_redis_state:set_screen(S1, groups), []};
+update({groups_loaded, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
 update({key, Key, Mods}, State) ->
     handle_event(Key, Mods, State);
 update(_Msg, State) ->
@@ -361,7 +423,9 @@ handle_escape(#dui_state{screen = live_metrics} = State) ->
     {dui_redis_state:set_screen(S1, keys), []};
 handle_escape(#dui_state{screen = S} = State)
         when S =:= server_info; S =:= slow_log; S =:= client_list;
-             S =:= memory_stats; S =:= expiring_keys; S =:= logs ->
+             S =:= memory_stats; S =:= expiring_keys; S =:= logs;
+             S =:= pubsub_channels; S =:= redis_config; S =:= cluster_info;
+             S =:= groups ->
     {dui_redis_state:set_screen(State, keys), []};
 handle_escape(State) ->
     {dui_redis_state:clear_status(State), []}.
@@ -395,7 +459,8 @@ screen_key(#dui_state{screen = switch_db} = State, Key, _Mods) ->
 screen_key(#dui_state{screen = S} = State, Key, Mods)
         when S =:= server_info; S =:= slow_log; S =:= client_list;
              S =:= memory_stats; S =:= live_metrics; S =:= expiring_keys;
-             S =:= logs ->
+             S =:= logs; S =:= pubsub_channels; S =:= redis_config;
+             S =:= cluster_info; S =:= groups ->
     monitor_key(State, Key, Mods);
 screen_key(State, _Key, _Mods) ->
     {State, []}.
@@ -420,6 +485,8 @@ connections_key(State, Key, _Mods)
 connections_key(State, <<"r">>, _Mods) ->
     S1 = dui_redis_state:set_loading(State, true),
     {S1, [dui_redis_cmd:load_connections(State)]};
+connections_key(State, <<"g">>, _Mods) ->
+    start_groups(State);
 connections_key(State, _Key, _Mods) ->
     {State, []}.
 
@@ -588,8 +655,13 @@ keys_nav_key(State, <<"u">>, Mods) ->
         true -> move_key(State, -10);
         false -> start_history(State)
     end;
-keys_nav_key(State, Key, _Mods) when Key =:= home; Key =:= <<"g">> ->
+keys_nav_key(State, home, _Mods) ->
     select_key(State, 0);
+keys_nav_key(State, <<"g">>, Mods) ->
+    case lists:member(ctrl, Mods) of
+        true -> start_redis_config(State);
+        false -> select_key(State, 0)
+    end;
 keys_nav_key(State, Key, _Mods) when Key =:= 'end'; Key =:= <<"G">> ->
     Count = length(dui_redis_state:keys(State)),
     select_key(State, max(0, Count - 1));
@@ -643,6 +715,20 @@ keys_nav_key(State, <<"x">>, Mods) ->
     end;
 keys_nav_key(State, <<"O">>, _Mods) ->
     start_logs(State);
+keys_nav_key(State, <<"p">>, _Mods) ->
+    start_channels(State);
+keys_nav_key(State, <<"E">>, _Mods) ->
+    start_prompt(State, lua);
+keys_nav_key(State, <<"e">>, _Mods) ->
+    start_prompt(State, export);
+keys_nav_key(State, <<"I">>, _Mods) ->
+    start_prompt(State, import);
+keys_nav_key(State, <<"B">>, _Mods) ->
+    start_prompt(State, bulk_delete);
+keys_nav_key(State, <<"T">>, _Mods) ->
+    start_prompt(State, batch_ttl);
+keys_nav_key(State, <<"C">>, _Mods) ->
+    start_cluster(State);
 keys_nav_key(State, <<"D">>, _Mods) ->
     start_switch_db(State);
 keys_nav_key(State, _Key, _Mods) ->
@@ -1007,7 +1093,7 @@ save_editor(State) ->
 
 %% -- generic prompt ---------------------------------------------------------
 
--spec start_prompt(#dui_state{}, atom()) ->
+-spec start_prompt(#dui_state{}, term()) ->
     {#dui_state{}, [educkui_command:command()]}.
 start_prompt(State, rename) ->
     KeyMap = dui_redis_state:current_key(State),
@@ -1044,6 +1130,29 @@ start_prompt(State, json_path) ->
     Prompt = dui_redis_prompt:new([{path, <<"JSONPath (e.g. $.name)">>, false}],
                                   #{path => <<"$">>}),
     open_prompt(State, Prompt, {json_path, KeyMap});
+start_prompt(State, {publish, Channel}) ->
+    Prompt = dui_redis_prompt:new([{message, <<"Message">>, false}]),
+    open_prompt(State, Prompt, {publish, Channel});
+start_prompt(State, lua) ->
+    Prompt = dui_redis_prompt:new([{script, <<"Lua script">>, false}]),
+    open_prompt(State, Prompt, lua);
+start_prompt(State, export) ->
+    Prompt = dui_redis_prompt:new([{pattern, <<"Key pattern">>, false},
+                                   {filename, <<"Export filename">>, false}]),
+    open_prompt(State, Prompt, export);
+start_prompt(State, import) ->
+    Prompt = dui_redis_prompt:new([{filename, <<"Import filename">>, false}]),
+    open_prompt(State, Prompt, import);
+start_prompt(State, bulk_delete) ->
+    Prompt = dui_redis_prompt:new([{pattern, <<"Pattern to delete (e.g. user:*)">>, false}]),
+    open_prompt(State, Prompt, bulk_delete);
+start_prompt(State, batch_ttl) ->
+    Prompt = dui_redis_prompt:new([{pattern, <<"Key pattern">>, false},
+                                   {ttl, <<"TTL seconds">>, false}]),
+    open_prompt(State, Prompt, batch_ttl);
+start_prompt(State, {config_edit, Param, Current}) ->
+    Prompt = dui_redis_prompt:new([{value, <<"New value">>, false}], #{value => Current}),
+    open_prompt(State, Prompt, {config_edit, Param, Current});
 start_prompt(State, Action) when Action =:= collection_add;
                                  Action =:= collection_remove ->
     KeyMap = dui_redis_state:current_key(State),
@@ -1162,7 +1271,30 @@ prompt_action({compare, _}, Values) ->
                                        maps:get(k2, Values, <<>>))]};
 prompt_action({json_path, KeyMap}, Values) ->
     Key = maps:get(key, KeyMap),
-    {key_detail, [dui_redis_cmd:json_get_path(Key, maps:get(path, Values, <<>>))]}.
+    {key_detail, [dui_redis_cmd:json_get_path(Key, maps:get(path, Values, <<>>))]};
+prompt_action({publish, Channel}, Values) ->
+    {keys, [dui_redis_cmd:publish(Channel, maps:get(message, Values, <<>>))]};
+prompt_action(lua, Values) ->
+    {keys, [dui_redis_cmd:eval_script(maps:get(script, Values, <<>>))]};
+prompt_action(export, Values) ->
+    Pattern = default_pattern(maps:get(pattern, Values, <<>>)),
+    {keys, [dui_redis_cmd:export_keys(Pattern, maps:get(filename, Values, <<"export.json">>))]};
+prompt_action(import, Values) ->
+    {keys, [dui_redis_cmd:import_keys(maps:get(filename, Values, <<"export.json">>))]};
+prompt_action(bulk_delete, Values) ->
+    {keys, [dui_redis_cmd:bulk_delete(default_pattern(maps:get(pattern, Values, <<>>)))]};
+prompt_action(batch_ttl, Values) ->
+    Ttl = case parse_int(maps:get(ttl, Values, <<>>)) of
+        {ok, N} -> N;
+        error -> 0
+    end,
+    {keys, [dui_redis_cmd:batch_ttl(default_pattern(maps:get(pattern, Values, <<>>)), Ttl)]};
+prompt_action({config_edit, Param, _Current}, Values) ->
+    {redis_config, [dui_redis_cmd:set_config(Param, maps:get(value, Values, <<>>))]}.
+
+-spec default_pattern(binary()) -> binary().
+default_pattern(<<>>) -> <<"*">>;
+default_pattern(P) -> P.
 
 -spec collection_fun(atom(), add | remove, binary(), map()) -> fun(() -> term()).
 collection_fun(list, add, Key, V) ->
@@ -1492,6 +1624,45 @@ start_logs(State) ->
     S1 = dui_redis_state:set_result_text(State, Text),
     {dui_redis_state:set_screen(S1, logs), []}.
 
+-spec start_channels(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_channels(State) ->
+    {dui_redis_state:set_loading(State, true), [dui_redis_cmd:load_channels(State)]}.
+
+-spec start_cluster(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_cluster(State) ->
+    {dui_redis_state:set_loading(State, true), [dui_redis_cmd:load_cluster(State)]}.
+
+-spec start_redis_config(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_redis_config(State) ->
+    {dui_redis_state:set_loading(State, true), [dui_redis_cmd:load_redis_config(State)]}.
+
+-spec start_groups(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_groups(State) ->
+    {dui_redis_state:set_loading(State, true), [dui_redis_cmd:load_groups(State)]}.
+
+-spec publish_selected(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+publish_selected(State) ->
+    Channels = dui_redis_state:channels(State),
+    case Channels of
+        [] ->
+            {State, []};
+        _ ->
+            Index = min(dui_redis_state:row_selected(State), length(Channels) - 1),
+            start_prompt(State, {publish, lists:nth(Index + 1, Channels)})
+    end.
+
+-spec edit_selected_config(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+edit_selected_config(State) ->
+    Params = dui_redis_state:config_params(State),
+    case Params of
+        [] ->
+            {State, []};
+        _ ->
+            Index = min(dui_redis_state:row_selected(State), length(Params) - 1),
+            {Param, Value} = lists:nth(Index + 1, Params),
+            start_prompt(State, {config_edit, Param, Value})
+    end.
+
 -spec format_logs([map()]) -> binary().
 format_logs(Logs) ->
     join_lines([format_log(E) || E <- Logs]).
@@ -1514,6 +1685,12 @@ monitor_key(State, Key, _Mods) ->
     Count = row_count(State),
     Current = dui_redis_state:row_selected(State),
     case Key of
+        enter ->
+            case dui_redis_state:screen(State) of
+                pubsub_channels -> publish_selected(State);
+                redis_config -> edit_selected_config(State);
+                _ -> {State, []}
+            end;
         K when K =:= <<"j">>; K =:= down ->
             {dui_redis_state:set_row_selected(State, min(max(0, Count - 1), Current + 1)), []};
         K when K =:= <<"k">>; K =:= up ->
@@ -1535,6 +1712,10 @@ reload_monitor(State) ->
         memory_stats -> {State, [dui_redis_cmd:load_memory_stats(State)]};
         live_metrics -> {State, [dui_redis_cmd:load_live_metrics(State)]};
         expiring_keys -> {State, [dui_redis_cmd:load_expiring(State, 300)]};
+        pubsub_channels -> {State, [dui_redis_cmd:load_channels(State)]};
+        redis_config -> {State, [dui_redis_cmd:load_redis_config(State)]};
+        cluster_info -> {State, [dui_redis_cmd:load_cluster(State)]};
+        groups -> {State, [dui_redis_cmd:load_groups(State)]};
         logs -> start_logs(State);
         _ -> {State, []}
     end.
@@ -1551,6 +1732,10 @@ row_count(State) ->
                 Stats -> 6 + length(maps:get(top_keys, Stats, []))
             end;
         expiring_keys -> length(dui_redis_state:expiring(State));
+        pubsub_channels -> length(dui_redis_state:channels(State));
+        redis_config -> length(dui_redis_state:config_params(State));
+        cluster_info -> length(dui_redis_state:cluster_nodes(State));
+        groups -> length(dui_redis_state:groups(State));
         _ -> 0
     end.
 
@@ -1748,7 +1933,8 @@ screen_view(#dui_state{screen = switch_db} = State) ->
 screen_view(#dui_state{screen = S} = State)
         when S =:= server_info; S =:= slow_log; S =:= client_list;
              S =:= memory_stats; S =:= live_metrics; S =:= expiring_keys;
-             S =:= logs ->
+             S =:= logs; S =:= pubsub_channels; S =:= redis_config;
+             S =:= cluster_info; S =:= groups ->
     monitor_view(State);
 screen_view(_State) ->
     educkui_render_node:empty().
@@ -2157,6 +2343,10 @@ monitor_view(State) ->
         memory_stats -> memory_view(State);
         live_metrics -> metrics_view(State);
         expiring_keys -> expiring_view(State);
+        pubsub_channels -> channels_view(State);
+        redis_config -> redis_config_view(State);
+        cluster_info -> cluster_view(State);
+        groups -> groups_view(State);
         logs -> result_text_view(State);
         _ -> educkui_render_node:empty()
     end.
@@ -2272,6 +2462,47 @@ expiring_line(K) ->
     iolist_to_binary(io_lib:format("~-40s ~s",
         [to_bin(maps:get(key, K, <<>>)),
          dui_redis_fmt:ttl_render(maps:get(ttl, K, -1))])).
+
+-spec channels_view(#dui_state{}) -> #dui_node{}.
+channels_view(State) ->
+    Lines = dui_redis_state:channels(State),
+    lines_view(State, <<"Pub/Sub Channels">>, <<"Channel">>, Lines,
+               <<" j/k nav   enter publish   r refresh   esc back">>).
+
+-spec redis_config_view(#dui_state{}) -> #dui_node{}.
+redis_config_view(State) ->
+    Lines = [config_line(P) || P <- dui_redis_state:config_params(State)],
+    lines_view(State, <<"Redis Config">>, <<"Parameter                        Value">>, Lines,
+               <<" j/k nav   enter edit   r refresh   esc back">>).
+
+-spec config_line({binary(), binary()}) -> binary().
+config_line({K, V}) ->
+    iolist_to_binary(io_lib:format("~-32s ~s", [K, to_bin(V)])).
+
+-spec cluster_view(#dui_state{}) -> #dui_node{}.
+cluster_view(State) ->
+    Lines = [cluster_line(N) || N <- dui_redis_state:cluster_nodes(State)],
+    lines_view(State, <<"Cluster Info">>, <<"Role      Addr                  Slots">>, Lines,
+               <<" j/k nav   r refresh   esc back">>).
+
+-spec cluster_line(map()) -> binary().
+cluster_line(N) ->
+    iolist_to_binary(io_lib:format("~-9s ~-21s ~s",
+        [to_bin(maps:get(role, N, <<"unknown">>)),
+         to_bin(maps:get(addr, N, <<>>)),
+         iolist_to_binary(lists:join(<<",">>, [to_bin(S) || S <- maps:get(slots, N, [])]))])).
+
+-spec groups_view(#dui_state{}) -> #dui_node{}.
+groups_view(State) ->
+    Lines = [group_line(G) || G <- dui_redis_state:groups(State)],
+    lines_view(State, <<"Connection Groups">>, <<"Name                 Connections">>, Lines,
+               <<" esc back">>).
+
+-spec group_line(map()) -> binary().
+group_line(G) ->
+    iolist_to_binary(io_lib:format("~-20s ~s",
+        [to_bin(maps:get(name, G, <<>>)),
+         iolist_to_binary(lists:join(<<",">>, [to_bin(C) || C <- maps:get(connections, G, [])]))])).
 
 -spec metrics_view(#dui_state{}) -> #dui_node{}.
 metrics_view(State) ->

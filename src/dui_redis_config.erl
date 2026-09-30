@@ -30,7 +30,12 @@
     list_templates/1,
     add_template/2,
     delete_template/2,
-    default_templates/0
+    default_templates/0,
+    list_groups/1,
+    add_group/3,
+    delete_group/2,
+    add_connection_to_group/3,
+    remove_connection_from_group/3
 ]).
 
 -define(DIR, ".config/dui-redis").
@@ -96,6 +101,7 @@ to_path(Path) when is_list(Path) -> Path.
 -spec defaults() -> map().
 defaults() ->
     #{connections => [],
+      groups => [],
       favorites => [],
       recent_keys => [],
       templates => default_templates(),
@@ -313,6 +319,65 @@ delete_template(Path, Name) ->
         save(Path, Config#{templates => New})
     end).
 
+%% @doc Lists connection groups.
+-spec list_groups(string()) -> {ok, [map()]} | {error, term()}.
+list_groups(Path) ->
+    with_config(Path, fun(Config) -> {ok, maps:get(groups, Config, [])} end).
+
+%% @doc Adds a connection group.
+-spec add_group(string(), binary(), binary()) -> {ok, map()} | {error, term()}.
+add_group(Path, Name, Color) ->
+    with_config(Path, fun(Config) ->
+        Groups = maps:get(groups, Config, []),
+        Group = #{name => Name, color => Color, connections => []},
+        case save(Path, Config#{groups => Groups ++ [Group]}) of
+            ok -> {ok, Group};
+            {error, _} = Error -> Error
+        end
+    end).
+
+%% @doc Deletes a connection group by name.
+-spec delete_group(string(), binary()) -> ok | {error, term()}.
+delete_group(Path, Name) ->
+    with_config(Path, fun(Config) ->
+        Groups = maps:get(groups, Config, []),
+        New = [G || G <- Groups, maps:get(name, G, undefined) =/= Name],
+        save(Path, Config#{groups => New})
+    end).
+
+%% @doc Adds a connection id to a group.
+-spec add_connection_to_group(string(), binary(), integer()) -> ok | {error, term()}.
+add_connection_to_group(Path, GroupName, ConnId) ->
+    with_config(Path, fun(Config) ->
+        Groups = update_group(Config, GroupName, fun(G) ->
+            Conns = maps:get(connections, G, []),
+            case lists:member(ConnId, Conns) of
+                true -> G;
+                false -> G#{connections => Conns ++ [ConnId]}
+            end
+        end),
+        save(Path, Config#{groups => Groups})
+    end).
+
+%% @doc Removes a connection id from a group.
+-spec remove_connection_from_group(string(), binary(), integer()) -> ok | {error, term()}.
+remove_connection_from_group(Path, GroupName, ConnId) ->
+    with_config(Path, fun(Config) ->
+        Groups = update_group(Config, GroupName, fun(G) ->
+            Conns = maps:get(connections, G, []),
+            G#{connections => lists:delete(ConnId, Conns)}
+        end),
+        save(Path, Config#{groups => Groups})
+    end).
+
+-spec update_group(map(), binary(), fun((map()) -> map())) -> [map()].
+update_group(Config, GroupName, Fun) ->
+    Groups = maps:get(groups, Config, []),
+    [case maps:get(name, G, undefined) =:= GroupName of
+         true -> Fun(G);
+         false -> G
+     end || G <- Groups].
+
 %% ---------------------------------------------------------------------------
 %% Internal
 %% ---------------------------------------------------------------------------
@@ -328,6 +393,7 @@ normalize(Data) when is_map(Data) ->
     D = defaults(),
     D#{connections => [normalize_connection(C)
                         || C <- list_value(<<"connections">>, Data, [])],
+       groups => [normalize_group(G) || G <- list_value(<<"groups">>, Data, [])],
        favorites => [normalize_favorite(F) || F <- list_value(<<"favorites">>, Data, [])],
        recent_keys => [normalize_recent(R) || R <- list_value(<<"recent_keys">>, Data, [])],
        templates => normalize_templates(value(<<"templates">>, Data, undefined)),
@@ -356,6 +422,14 @@ normalize_connection(C) when is_map(C) ->
       created_at => value(<<"created_at">>, C, undefined),
       updated_at => value(<<"updated_at">>, C, undefined)};
 normalize_connection(_C) ->
+    #{}.
+
+-spec normalize_group(term()) -> map().
+normalize_group(G) when is_map(G) ->
+    #{name => value(<<"name">>, G, <<>>),
+      color => value(<<"color">>, G, <<>>),
+      connections => value(<<"connections">>, G, [])};
+normalize_group(_G) ->
     #{}.
 
 -spec normalize_templates(term()) -> [map()].

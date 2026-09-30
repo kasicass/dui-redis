@@ -103,6 +103,16 @@
     set_expiring/2,
     row_selected/1,
     set_row_selected/2,
+    channels/1,
+    set_channels/2,
+    config_params/1,
+    set_config_params/2,
+    cluster_nodes/1,
+    set_cluster_nodes/2,
+    cluster/1,
+    set_cluster/2,
+    groups/1,
+    set_groups/2,
     status/1,
     show_help/1,
     config_path/1,
@@ -465,6 +475,36 @@ row_selected(#dui_state{row_selected = N}) -> N.
 
 -spec set_row_selected(#dui_state{}, non_neg_integer()) -> #dui_state{}.
 set_row_selected(State, N) -> State#dui_state{row_selected = max(0, N)}.
+
+-spec channels(#dui_state{}) -> [binary()].
+channels(#dui_state{channels = C}) -> C.
+
+-spec set_channels(#dui_state{}, [binary()]) -> #dui_state{}.
+set_channels(State, C) -> State#dui_state{channels = C, row_selected = 0, loading = false}.
+
+-spec config_params(#dui_state{}) -> [{binary(), binary()}].
+config_params(#dui_state{config_params = P}) -> P.
+
+-spec set_config_params(#dui_state{}, [{binary(), binary()}]) -> #dui_state{}.
+set_config_params(State, P) -> State#dui_state{config_params = P, row_selected = 0, loading = false}.
+
+-spec cluster_nodes(#dui_state{}) -> [map()].
+cluster_nodes(#dui_state{cluster_nodes = N}) -> N.
+
+-spec set_cluster_nodes(#dui_state{}, [map()]) -> #dui_state{}.
+set_cluster_nodes(State, N) -> State#dui_state{cluster_nodes = N, row_selected = 0, loading = false}.
+
+-spec cluster(#dui_state{}) -> map() | undefined.
+cluster(#dui_state{cluster = C}) -> C.
+
+-spec set_cluster(#dui_state{}, map()) -> #dui_state{}.
+set_cluster(State, C) -> State#dui_state{cluster = C, loading = false}.
+
+-spec groups(#dui_state{}) -> [map()].
+groups(#dui_state{groups = G}) -> G.
+
+-spec set_groups(#dui_state{}, [map()]) -> #dui_state{}.
+set_groups(State, G) -> State#dui_state{groups = G, row_selected = 0, loading = false}.
 
 -spec status(#dui_state{}) -> {info | error, binary()} | undefined.
 status(#dui_state{status = Status}) -> Status.

@@ -40,6 +40,17 @@
     load_memory_stats/1,
     load_live_metrics/1,
     load_expiring/2,
+    load_channels/1,
+    publish/2,
+    eval_script/1,
+    load_redis_config/1,
+    set_config/2,
+    load_cluster/1,
+    export_keys/2,
+    import_keys/1,
+    bulk_delete/1,
+    batch_ttl/2,
+    load_groups/1,
     switch_db/2,
     debounce_filter/3
 ]).
@@ -281,6 +292,75 @@ load_live_metrics(_State) ->
 load_expiring(_State, Threshold) ->
     educkui_command:exec(fun() ->
         {expiring_loaded, safe(fun() -> dui_redis_client:expiring_keys(Threshold) end)}
+    end).
+
+%% -- pub/sub / lua / config / cluster / io ----------------------------------
+
+-spec load_channels(#dui_state{}) -> educkui_command:command().
+load_channels(_State) ->
+    educkui_command:exec(fun() ->
+        {channels_loaded, safe(fun() -> dui_redis_client:pubsub_channels(<<"*">>) end)}
+    end).
+
+-spec publish(binary(), binary()) -> educkui_command:command().
+publish(Channel, Message) ->
+    educkui_command:exec(fun() ->
+        {published, Channel, safe(fun() -> dui_redis_client:publish(Channel, Message) end)}
+    end).
+
+-spec eval_script(binary()) -> educkui_command:command().
+eval_script(Script) ->
+    educkui_command:exec(fun() ->
+        {lua_result, safe(fun() -> dui_redis_client:eval_script(Script) end)}
+    end).
+
+-spec load_redis_config(#dui_state{}) -> educkui_command:command().
+load_redis_config(_State) ->
+    educkui_command:exec(fun() ->
+        {redis_config_loaded, safe(fun() -> dui_redis_client:config_get(<<"*">>) end)}
+    end).
+
+-spec set_config(binary(), binary()) -> educkui_command:command().
+set_config(Param, Value) ->
+    educkui_command:exec(fun() ->
+        {config_set, Param, safe(fun() -> dui_redis_client:config_set(Param, Value) end)}
+    end).
+
+-spec load_cluster(#dui_state{}) -> educkui_command:command().
+load_cluster(_State) ->
+    educkui_command:exec(fun() ->
+        {cluster_loaded, safe(fun() -> dui_redis_client:cluster_nodes() end)}
+    end).
+
+-spec export_keys(binary(), binary()) -> educkui_command:command().
+export_keys(Pattern, Filename) ->
+    educkui_command:exec(fun() ->
+        {export_done, safe(fun() -> dui_redis_client:export_to_file(Pattern, Filename) end)}
+    end).
+
+-spec import_keys(binary()) -> educkui_command:command().
+import_keys(Filename) ->
+    educkui_command:exec(fun() ->
+        {import_done, safe(fun() -> dui_redis_client:import_from_file(Filename) end)}
+    end).
+
+-spec bulk_delete(binary()) -> educkui_command:command().
+bulk_delete(Pattern) ->
+    educkui_command:exec(fun() ->
+        {bulk_deleted, safe(fun() -> dui_redis_client:bulk_delete(Pattern) end)}
+    end).
+
+-spec batch_ttl(binary(), integer()) -> educkui_command:command().
+batch_ttl(Pattern, Ttl) ->
+    educkui_command:exec(fun() ->
+        {batch_ttl_done, safe(fun() -> dui_redis_client:batch_set_ttl(Pattern, Ttl) end)}
+    end).
+
+-spec load_groups(#dui_state{}) -> educkui_command:command().
+load_groups(State) ->
+    Path = config_path(State),
+    educkui_command:exec(fun() ->
+        {groups_loaded, safe(fun() -> dui_redis_config:list_groups(Path) end)}
     end).
 
 %% @doc Switches the active database.

@@ -33,6 +33,10 @@ screen_name(memory_stats) -> <<"Memory Stats">>;
 screen_name(live_metrics) -> <<"Live Metrics">>;
 screen_name(expiring_keys) -> <<"Expiring Keys">>;
 screen_name(logs) -> <<"Logs">>;
+screen_name(groups) -> <<"Connection Groups">>;
+screen_name(pubsub_channels) -> <<"Pub/Sub">>;
+screen_name(redis_config) -> <<"Redis Config">>;
+screen_name(cluster_info) -> <<"Cluster Info">>;
 screen_name(switch_db) -> <<"Switch Database">>;
 screen_name(help) -> <<"Help">>;
 screen_name(Other) -> atom_to_binary(Other, utf8).

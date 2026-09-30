@@ -15,7 +15,8 @@ help_toggle_test() ->
     ok = educkui_test:send_key(Pid, <<"?">>),
     ?assertEqual(ok, educkui_test:assert_text(Pid, <<"toggle this help">>)),
     ok = educkui_test:send_key(Pid, esc),
-    ok = educkui_test:sync(Pid),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.show_help =:= false end, 50)),
     ?assertEqual(ok, educkui_test:assert_text(Pid, <<"No connections saved">>)),
     cleanup(Pid, Dir).
 
@@ -297,6 +298,55 @@ live_monitoring_screens() ->
     ?assertEqual(ok, educkui_test:wait_until(Pid,
         fun(S) -> S#dui_state.screen =:= expiring_keys end, 200)),
     ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Expiring Keys">>)),
+    cleanup(Pid, Dir),
+    _ = application:stop(dui_redis),
+    ok.
+
+live_ops_screens_test_() ->
+    case redis_available() of
+        true -> {timeout, 40, fun live_ops_screens/0};
+        false -> []
+    end.
+
+live_ops_screens() ->
+    reset_app(),
+    seed_keys(),
+    Dir = mk_tmp(),
+    Path = filename:join(Dir, "config.json"),
+    save_conn(Path, <<"Local">>, <<"localhost">>, 6379),
+    Pid = educkui_test:start(#{root => dui_redis_root, size => {24, 100},
+                               init_args => [{opts, #{config_path => Path}}]}),
+    ok = educkui_test:send_event(Pid, educkui_event:resize(100, 24)),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 300)),
+    ok = educkui_test:send_key(Pid, enter),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.connected end, 300)),
+    %% redis config
+    ok = educkui_test:send_event(Pid, educkui_event:key(<<"g">>, [{modifiers, [ctrl]}])),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.screen =:= redis_config end, 150)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Redis Config">>)),
+    ok = educkui_test:send_key(Pid, esc),
+    %% pub/sub channels
+    ok = educkui_test:send_key(Pid, <<"p">>),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.screen =:= pubsub_channels end, 150)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Pub/Sub Channels">>)),
+    ok = educkui_test:send_key(Pid, esc),
+    %% bulk delete
+    ok = educkui_test:send_key(Pid, <<"B">>),
+    ?assertEqual(ok, educkui_test:sync(Pid)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Pattern to delete">>)),
+    ok = educkui_test:send_keys(Pid, [<<"m">>, <<"2">>, <<":">>, <<"*">>]),
+    ok = educkui_test:send_key(Pid, enter),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) ->
+            case S#dui_state.status of
+                {info, _} -> true;
+                _ -> false
+            end
+        end, 200)),
     cleanup(Pid, Dir),
     _ = application:stop(dui_redis),
     ok.

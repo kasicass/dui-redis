@@ -177,6 +177,47 @@ live_monitoring() ->
     ?assertNot(lists:member(<<"m5:long">>, Keys)),
     ok = dui_redis_client:disconnect().
 
+live_ops_test_() ->
+    case redis_available() of
+        true -> {timeout, 40, fun live_ops/0};
+        false -> []
+    end.
+
+live_ops() ->
+    ensure_client(),
+    ok = dui_redis_client:connect(#{host => <<"localhost">>, port => 6379, db => 0}),
+    {ok, _} = dui_redis_client:q([<<"FLUSHDB">>]),
+    {ok, _} = dui_redis_client:set_string(<<"m6:a">>, <<"v">>, 0),
+    {ok, _} = dui_redis_client:set_string(<<"m6:b">>, <<"v">>, 0),
+    ?assertEqual({ok, 0}, dui_redis_client:publish(<<"m6:chan">>, <<"hi">>)),
+    {ok, _Channels} = dui_redis_client:pubsub_channels(<<"*">>),
+    {ok, Config} = dui_redis_client:config_get(<<"maxmemory">>),
+    ?assert(maps:is_key(<<"maxmemory">>, Config)),
+    ok = dui_redis_client:config_set(<<"maxmemory">>, <<"0">>),
+    ?assertEqual({ok, <<"2">>}, dui_redis_client:eval_script(<<"return 1+1">>)),
+    {ok, Deleted} = dui_redis_client:bulk_delete(<<"m6:*">>),
+    ?assertEqual(2, Deleted),
+    %% batch TTL
+    {ok, _} = dui_redis_client:set_string(<<"m6t:a">>, <<"v">>, 0),
+    {ok, _} = dui_redis_client:set_string(<<"m6t:b">>, <<"v">>, 0),
+    {ok, TtlCount} = dui_redis_client:batch_set_ttl(<<"m6t:*">>, 100),
+    ?assertEqual(2, TtlCount),
+    %% export / import round-trip
+    Dir = filename:join("/tmp", "dui_m6_" ++ integer_to_list(erlang:unique_integer([positive]))),
+    ok = filelib:ensure_dir(filename:join(Dir, "x")),
+    File = filename:join(Dir, "export.json"),
+    {ok, Exported} = dui_redis_client:export_to_file(<<"m6t:*">>, File),
+    ?assert(Exported >= 1),
+    {ok, _} = dui_redis_client:q([<<"FLUSHDB">>]),
+    {ok, Imported} = dui_redis_client:import_from_file(File),
+    ?assertEqual(2, Imported),
+    {ok, Value} = dui_redis_client:q([<<"GET">>, <<"m6t:a">>]),
+    ?assertEqual(<<"v">>, Value),
+    _ = file:del_dir_r(Dir),
+    %% cluster on standalone returns an error
+    ?assertMatch({error, _}, dui_redis_client:cluster_nodes()),
+    ok = dui_redis_client:disconnect().
+
 %% ---------------------------------------------------------------------------
 
 ensure_client() ->
