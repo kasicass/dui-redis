@@ -2994,7 +2994,13 @@ confirm_view(State) ->
         _ ->
             {<<"Confirm">>, <<"(y/n)">>}
     end,
-    modal(State, Title, [educkui_render_node:text(Content)], 50).
+    educkui_render_node:widget(educkui_widget_dialog, #{
+        title => Title,
+        content => Content,
+        buttons => [],
+        width => 50,
+        height => 6
+    }).
 
 %% -- keys -------------------------------------------------------------------
 
