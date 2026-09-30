@@ -55,7 +55,8 @@ event_to_msg(_Event, _State) ->
 -spec update(term(), #dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
 update(tick, State) ->
     S1 = dui_redis_state:incr_tick(State),
-    {S1, tick_commands(S1)};
+    S2 = expire_status(S1),
+    {S2, tick_commands(S2)};
 update({resize, W, H}, State) ->
     {dui_redis_state:set_size(State, H, W), []};
 update({config_loaded, {ok, Config}}, State) ->
@@ -1592,6 +1593,21 @@ build_compare_text(V1, V2, Diff) ->
 
 %% -- monitoring (M5) --------------------------------------------------------
 
+%% @doc Auto-expires transient info statuses so the colored default status
+%% bar becomes visible again; errors persist until the user acts.
+-spec expire_status(#dui_state{}) -> #dui_state{}.
+expire_status(State) ->
+    case dui_redis_state:status(State) of
+        {info, _} ->
+            Age = dui_redis_state:ticks(State) - dui_redis_state:status_tick(State),
+            case Age >= 4 of
+                true -> dui_redis_state:clear_status(State);
+                false -> State
+            end;
+        _ ->
+            State
+    end.
+
 -spec tick_commands(#dui_state{}) -> [educkui_command:command()].
 tick_commands(State) ->
     Metrics = case dui_redis_state:metrics_active(State) of
@@ -1900,8 +1916,25 @@ title_bar(State) ->
         Conn -> dui_redis_fmt:connection_label(Conn)
     end,
     Text = <<" dui-redis ", Version/binary, "  |  ", Info/binary>>,
-    educkui_render_node:height(
-        educkui_render_node:text(Text, dui_redis_theme:title()), 1).
+    Base = educkui_render_node:height(
+        educkui_render_node:text(Text, dui_redis_theme:title()), 1),
+    case loading_active(State) of
+        true ->
+            Spinner = educkui_render_node:width(
+                educkui_render_node:widget(educkui_widget_spinner, #{
+                    frame => dui_redis_state:ticks(State),
+                    style => dui_redis_theme:info(),
+                    suffix => <<" loading">>
+                }), 12),
+            educkui_render_node:height(
+                educkui_render_node:stack(horizontal, [Base, Spinner]), 1);
+        false ->
+            Base
+    end.
+
+-spec loading_active(#dui_state{}) -> boolean().
+loading_active(State) ->
+    dui_redis_state:loading(State) orelse dui_redis_state:loading_keys(State).
 
 -spec screen_title(#dui_state{}) -> binary().
 screen_title(#dui_state{screen = connection_form, conn_form = Form}) ->
@@ -1927,10 +1960,11 @@ screen_view(#dui_state{screen = connection_form} = State) ->
 screen_view(#dui_state{screen = test_connection} = State) ->
     test_view(State);
 screen_view(#dui_state{screen = confirm_delete} = State) ->
-    educkui_render_node:overlay([
-        connections_view(State),
-        confirm_view(State)
-    ]);
+    educkui_render_node:height(
+        educkui_render_node:overlay([
+            connections_view(State),
+            confirm_view(State)
+        ]), auto);
 screen_view(#dui_state{screen = keys} = State) ->
     keys_view(State);
 screen_view(#dui_state{screen = key_detail} = State) ->
@@ -1956,19 +1990,101 @@ screen_view(#dui_state{screen = S} = State)
 screen_view(_State) ->
     educkui_render_node:empty().
 
+%% -- centered modal ---------------------------------------------------------
+
+%% @doc Renders a centered, bordered modal box with a title and content lines.
+-spec modal(#dui_state{}, binary(), [#dui_node{}], pos_integer()) -> #dui_node{}.
+modal(State, Title, Content, Width0) ->
+    {Rows, Cols} = dui_redis_state:size(State),
+    Width = min(Width0, max(20, Cols - 2)),
+    NeededH = length(Content) + 3,
+    MaxH = max(3, Rows - 4),
+    Height = min(NeededH, MaxH),
+    Lines = lists:sublist(Content, 1, max(0, Height - 3)),
+    TitleNode = educkui_render_node:text(
+        <<" ", Title/binary>>, dui_redis_theme:title()),
+    Inner = educkui_render_node:stack(vertical, [TitleNode | Lines]),
+    Box = educkui_render_node:widget(educkui_widget_block, #{
+        border => true,
+        border_style => dui_redis_theme:border()
+    }),
+    Border = educkui_render_node:width(
+        educkui_render_node:height(Box, Height), Width),
+    ContentBox = educkui_render_node:box(
+        [educkui_render_node:at(2, 1, Inner)],
+        [{width, Width}, {height, Height}]),
+    educkui_render_node:height(
+        educkui_render_node:overlay([center(Border), center(ContentBox)]), auto).
+
+%% @doc Centers a fixed-size node both horizontally and vertically.
+-spec center(#dui_node{}) -> #dui_node{}.
+center(Node) ->
+    Horizontal = educkui_render_node:stack(horizontal, [Node], [{align, center}]),
+    educkui_render_node:stack(vertical, [Horizontal], [{align, center}]).
+
+%% @doc Renders a bordered panel with a title and content lines, filling the
+%% given width and height. Unlike `modal/4' it is not centered.
+-spec panel(binary(), [#dui_node{}], pos_integer(), pos_integer()) -> #dui_node{}.
+panel(Title, Content, Width, Height) ->
+    TitleNode = educkui_render_node:text(
+        <<" ", Title/binary>>, dui_redis_theme:title()),
+    Inner = educkui_render_node:stack(vertical, [TitleNode | Content]),
+    Box = educkui_render_node:widget(educkui_widget_block, #{
+        border => true,
+        border_style => dui_redis_theme:border()
+    }),
+    Border = educkui_render_node:width(
+        educkui_render_node:height(Box, Height), Width),
+    ContentBox = educkui_render_node:width(
+        educkui_render_node:height(
+            educkui_render_node:at(2, 1, Inner), Height), Width),
+    educkui_render_node:width(
+        educkui_render_node:height(
+            educkui_render_node:overlay([Border, ContentBox]), Height), Width).
+
+%% @doc A unified screen header: title plus a dim horizontal rule.
+-spec screen_header(binary()) -> #dui_node{}.
+screen_header(Title) ->
+    educkui_render_node:stack(vertical, [
+        educkui_render_node:text(<<" ", Title/binary>>, dui_redis_theme:title()),
+        educkui_render_node:text(
+            binary:copy(<<226, 148, 128>>, 200), dui_redis_theme:dim())
+    ]).
+
+%% @doc A gauge row sized so its trailing percentage label stays inside the
+%% available width (the gauge widget draws the label one cell past the bar).
+-spec gauge_row(number(), pos_integer(), #dui_style{}) -> #dui_node{}.
+gauge_row(Value, Width, FillStyle) ->
+    BarW = max(10, Width - 6),
+    Gauge = educkui_render_node:width(
+        educkui_render_node:height(
+            educkui_render_node:widget(educkui_widget_gauge, #{
+                value => Value,
+                style => dui_redis_theme:dim(),
+                fill_style => FillStyle
+            }), 1),
+        BarW),
+    educkui_render_node:stack(horizontal, [Gauge]).
+
 %% -- connections ------------------------------------------------------------
 
 -spec connections_view(#dui_state{}) -> #dui_node{}.
 connections_view(State) ->
     Conns = dui_redis_state:connections(State),
     Header = iolist_to_binary(io_lib:format("Saved Connections (~b)", [length(Conns)])),
+    {Rows, _} = dui_redis_state:size(State),
+    ErrorCount = case dui_redis_state:connection_error(State) of
+        undefined -> 0;
+        _ -> 1
+    end,
+    Visible = max(1, Rows - 12 - ErrorCount),
     Body = case Conns of
         [] ->
             educkui_render_node:text(
                 <<"  No connections saved. Press 'a' to add your first Redis connection.">>,
                 dui_redis_theme:dim());
         _ ->
-            list_widget(Conns, State)
+            list_widget(Conns, State, Visible)
     end,
     ErrorNodes = case dui_redis_state:connection_error(State) of
         undefined -> [];
@@ -1987,11 +2103,11 @@ connections_view(State) ->
 
 -spec logo_lines() -> [binary()].
 logo_lines() ->
-    [<<"  ____  _____ ____  ___ ____">>,
-     <<" |  _ ", 92, "| ____|  _ ", 92, "|_ _/ ___|">>,
-     <<" | | | |  _| | | | || |", 92, "___ ", 92>>,
-     <<" | |_| | |___| |_| || | ___) |">>,
-     <<" |____/|_____|____/|___|____/">>].
+    [<<"  ____  _____ ____ ___ ____">>,
+     <<" |  _ \\| ____|  _ \\_ _/ ___|">>,
+     <<" | |_) |  _| | | | | |\\___ \\">>,
+     <<" |  _ <| |___| |_| | | ___) |">>,
+     <<" |_| \\_\\_____|____/___|____/">>].
 
 -spec stats_spans(#dui_state{}, non_neg_integer()) -> [{binary(), term()}].
 stats_spans(State, Count) ->
@@ -2011,12 +2127,11 @@ stats_spans(State, Count) ->
      {<<"    Status: ">>, dui_redis_theme:dim()},
      Status].
 
--spec list_widget([map()], #dui_state{}) -> #dui_node{}.
-list_widget(Conns, State) ->
+-spec list_widget([map()], #dui_state{}, pos_integer()) -> #dui_node{}.
+list_widget(Conns, State, Visible0) ->
     Total = length(Conns),
     Selected = min(dui_redis_state:selected(State), max(0, Total - 1)),
-    {Rows, _} = dui_redis_state:size(State),
-    Visible = max(1, Rows - 7),
+    Visible = max(1, Visible0),
     {Offset, _} = educkui_widget_list:visible_range(Total, Selected, Visible),
     Window = lists:sublist(Conns, Offset + 1, Visible),
     Lines = [conn_spans(C, Offset + I =:= Selected)
@@ -2073,13 +2188,11 @@ form_view(State) ->
         undefined -> [];
         Error -> [educkui_render_node:text(<<"  ", Error/binary>>, dui_redis_theme:error())]
     end,
-    educkui_render_node:stack(vertical, [
-        educkui_render_node:text(<<"">>)
-        | FieldNodes ++ ErrorNodes ++ [
-            educkui_render_node:text(<<"">>),
-            footer(<<" tab next   space toggle   enter save   Ctrl+T test   esc cancel">>)
-        ]
-    ]).
+    Content = [educkui_render_node:text(<<"">>) | FieldNodes]
+        ++ ErrorNodes
+        ++ [educkui_render_node:text(<<"">>),
+            footer(<<" tab next   space toggle   enter save   Ctrl+T test   esc cancel">>)],
+    modal(State, screen_title(State), Content, 72).
 
 -spec focused_field_nodes(map(), non_neg_integer(), non_neg_integer(), map()) ->
     [#dui_node{}].
@@ -2140,14 +2253,13 @@ test_view(State) ->
         <<"Failed", _/binary>> -> dui_redis_theme:error();
         _ -> dui_redis_theme:dim()
     end,
-    educkui_render_node:stack(vertical, [
-        educkui_render_node:text(<<"">>),
-        educkui_render_node:text(<<"  Test Connection">>, dui_redis_theme:subtitle()),
+    Content = [
         educkui_render_node:text(<<"">>),
         educkui_render_node:text(<<"  ", Result/binary>>, Style),
         educkui_render_node:text(<<"">>),
         footer(<<" esc/enter back">>)
-    ]).
+    ],
+    modal(State, <<"Test Connection">>, Content, 52).
 
 %% -- key detail / editor / prompt -------------------------------------------
 
@@ -2161,8 +2273,9 @@ detail_view(State) ->
     Type = current_type(State),
     TtlSeconds = maps:get(ttl, KeyMap, -1),
     Ttl = dui_redis_fmt:ttl_render(TtlSeconds),
-    {Rows, _} = dui_redis_state:size(State),
-    Visible = max(1, Rows - 8),
+    {Rows, Cols} = dui_redis_state:size(State),
+    PanelH = max(3, Rows - 6),
+    Visible = max(1, PanelH - 3),
     LineNodes = value_line_nodes(dui_redis_state:current_value(State), Visible, State),
     MetaNode = educkui_render_node:widget(educkui_widget_text_view, #{lines => [[
         {<<"  type: ">>, dui_redis_theme:dim()},
@@ -2173,9 +2286,8 @@ detail_view(State) ->
     educkui_render_node:stack(vertical, [
         educkui_render_node:text(<<" ", Name/binary>>, dui_redis_theme:title()),
         MetaNode,
-        educkui_render_node:text(<<>>)
-        | LineNodes] ++
-        [footer(<<" e edit   a add   x remove   t ttl   R rename   c copy   d delete   r refresh   esc back">>)
+        panel(<<"Value">>, LineNodes, Cols, PanelH),
+        footer(<<" e edit   a add   x remove   t ttl   R rename   c copy   d delete   r refresh   esc back">>)
     ]).
 
 %% @doc Builds the value body nodes, highlighting JSON values.
@@ -2214,16 +2326,16 @@ editor_view(State) ->
     Lines = dui_redis_editor:lines(Editor),
     Row = dui_redis_editor:row(Editor),
     Col = dui_redis_editor:col(Editor),
-    {Rows, _} = dui_redis_state:size(State),
-    Visible = max(1, Rows - 6),
+    {Rows, Cols} = dui_redis_state:size(State),
+    PanelH = max(3, Rows - 4),
+    Visible = max(1, PanelH - 3),
     Offset = max(0, Row - Visible + 1),
     Window = lists:sublist(Lines, Offset + 1, Visible),
     LineNodes = [editor_line_node(L, Offset + I, Row, Col)
                  || {L, I} <- lists:zip(Window, lists:seq(0, length(Window) - 1))],
     educkui_render_node:stack(vertical, [
-        educkui_render_node:text(<<" Edit value   Ctrl+S/F2 save   Esc cancel">>, dui_redis_theme:subtitle()),
-        educkui_render_node:text(<<>>)
-        | LineNodes ++ [footer(<<" arrows move   enter newline   Ctrl+S/F2 save   Esc cancel">>)]
+        panel(<<"Edit value">>, LineNodes, Cols, PanelH),
+        footer(<<" arrows move   enter newline   Ctrl+S/F2 save   Esc cancel">>)
     ]).
 
 -spec editor_line_node(binary(), non_neg_integer(), non_neg_integer(), non_neg_integer()) ->
@@ -2259,13 +2371,35 @@ prompt_view(State) ->
     FieldNodes = lists:flatmap(
         fun({Field, Index}) -> prompt_field_nodes(Field, Index, Focus, Prompt) end,
         lists:zip(Fields, lists:seq(0, length(Fields) - 1))),
-    educkui_render_node:stack(vertical, [
-        educkui_render_node:text(<<>>),
-        educkui_render_node:text(<<"  Tab next field   Enter submit   Esc cancel">>,
-                                 dui_redis_theme:subtitle()),
+    Title = prompt_title(dui_redis_state:prompt_purpose(State)),
+    Content = [
+        educkui_render_node:text(
+            <<" Tab next field   Enter submit   Esc cancel">>, dui_redis_theme:subtitle()),
         educkui_render_node:text(<<>>)
         | FieldNodes
-    ]).
+    ],
+    modal(State, Title, Content, 72).
+
+%% @doc Derives a human-readable title from the prompt purpose.
+-spec prompt_title(term()) -> binary().
+prompt_title({rename, _}) -> <<"Rename Key">>;
+prompt_title({copy, _}) -> <<"Copy Key">>;
+prompt_title({ttl, _}) -> <<"Set TTL">>;
+prompt_title({regex, _}) -> <<"Regex Search">>;
+prompt_title({fuzzy, _}) -> <<"Fuzzy Search">>;
+prompt_title({search_value, _}) -> <<"Search by Value">>;
+prompt_title({compare, _}) -> <<"Compare Keys">>;
+prompt_title({json_path, _}) -> <<"JSONPath">>;
+prompt_title({publish, _}) -> <<"Publish Message">>;
+prompt_title(lua) -> <<"Lua Script">>;
+prompt_title(export) -> <<"Export Keys">>;
+prompt_title(import) -> <<"Import Keys">>;
+prompt_title(bulk_delete) -> <<"Bulk Delete">>;
+prompt_title(batch_ttl) -> <<"Batch TTL">>;
+prompt_title({collection_add, _, _}) -> <<"Add Member">>;
+prompt_title({collection_remove, _, _}) -> <<"Remove Member">>;
+prompt_title({config_edit, _, _}) -> <<"Edit Config">>;
+prompt_title(_) -> <<"Input">>.
 
 -spec prompt_field_nodes(dui_redis_prompt:field(), non_neg_integer(),
                          non_neg_integer(), dui_redis_prompt:prompt()) -> [#dui_node{}].
@@ -2301,11 +2435,11 @@ results_view(State) ->
     Count = length(Results),
     Selected = min(dui_redis_state:selected_result(State), max(0, Count - 1)),
     {Rows, _} = dui_redis_state:size(State),
-    Visible = max(1, Rows - 5),
+    Visible = max(1, Rows - 6),
     {Offset, _} = educkui_widget_list:visible_range(Count, Selected, Visible),
     Window = lists:sublist(Results, Offset + 1, Visible),
     Lines = [result_line(Purpose, R) || R <- Window],
-    Header = iolist_to_binary(io_lib:format(" ~s  (~b)", [Title, Count])),
+    Header = iolist_to_binary(io_lib:format("~s  (~b)", [Title, Count])),
     Body = case Lines of
         [] ->
             educkui_render_node:height(
@@ -2321,7 +2455,7 @@ results_view(State) ->
                 }), Visible)
     end,
     educkui_render_node:stack(vertical, [
-        educkui_render_node:text(Header, dui_redis_theme:subtitle()),
+        screen_header(Header),
         Body,
         footer(<<" j/k nav   enter open   d remove   esc back">>)
     ]).
@@ -2356,7 +2490,7 @@ tree_view(State) ->
     Selected = min(dui_redis_state:selected_tree(State), max(0, Count - 1)),
     Expanded = dui_redis_state:tree_expanded(State),
     {Rows, _} = dui_redis_state:size(State),
-    Visible = max(1, Rows - 5),
+    Visible = max(1, Rows - 6),
     {Offset, _} = educkui_widget_list:visible_range(Count, Selected, Visible),
     Window = lists:sublist(Flat, Offset + 1, Visible),
     Lines = [tree_line(Depth, Node, Expanded) || {Depth, Node} <- Window],
@@ -2375,7 +2509,7 @@ tree_view(State) ->
                 }), Visible)
     end,
     educkui_render_node:stack(vertical, [
-        educkui_render_node:text(<<" Tree">>, dui_redis_theme:subtitle()),
+        screen_header(<<"Tree">>),
         Body,
         footer(<<" j/k nav   enter/right expand   left collapse   esc back">>)
     ]).
@@ -2407,11 +2541,10 @@ result_text_view(State) ->
     end,
     Lines = binary:split(Text, <<"\n">>, [global]),
     {Rows, _} = dui_redis_state:size(State),
-    Visible = max(1, Rows - 4),
+    Visible = max(1, Rows - 6),
     Window = lists:sublist(Lines, Visible),
     educkui_render_node:stack(vertical, [
-        educkui_render_node:text(<<" Result">>, dui_redis_theme:subtitle()),
-        educkui_render_node:text(<<>>)
+        screen_header(<<"Result">>)
         | [educkui_render_node:text(<<"  ", L/binary>>) || L <- Window] ++
           [footer(<<" esc back">>)]
     ]).
@@ -2440,7 +2573,11 @@ lines_view(State, Title, Header, Lines, Hints) ->
     Count = length(Lines),
     Selected = min(dui_redis_state:row_selected(State), max(0, Count - 1)),
     {Rows, _} = dui_redis_state:size(State),
-    Visible = max(1, Rows - 5),
+    HeaderLines = case Header of
+        <<>> -> 0;
+        _ -> 1
+    end,
+    Visible = max(1, Rows - 6 - HeaderLines),
     {Offset, _} = educkui_widget_list:visible_range(Count, Selected, Visible),
     Body = case Lines of
         [] ->
@@ -2461,8 +2598,7 @@ lines_view(State, Title, Header, Lines, Hints) ->
         _ -> [educkui_render_node:text(<<"  ", Header/binary>>, dui_redis_theme:subtitle())]
     end,
     educkui_render_node:stack(vertical,
-        [educkui_render_node:text(<<" ", Title/binary>>, dui_redis_theme:title())]
-        ++ HeaderNodes ++ [Body, footer(Hints)]).
+        [screen_header(Title)] ++ HeaderNodes ++ [Body, footer(Hints)]).
 
 -spec info_view(#dui_state{}) -> #dui_node{}.
 info_view(State) ->
@@ -2470,6 +2606,8 @@ info_view(State) ->
         undefined -> #{};
         I -> I
     end,
+    {Rows, Cols} = dui_redis_state:size(State),
+    Height = max(3, Rows - 4),
     Lines = [
         kv(<<"version">>, maps:get(version, Info, <<>>)),
         kv(<<"mode">>, maps:get(mode, Info, <<>>)),
@@ -2484,7 +2622,11 @@ info_view(State) ->
         kv(<<"cluster">>, dui_redis_fmt:bool(maps:get(cluster, Info, false))),
         kv(<<"aof">>, dui_redis_fmt:bool(maps:get(aof, Info, false)))
     ],
-    lines_view(State, <<"Server Info">>, <<>>, Lines, <<" j/k nav   r refresh   esc back">>).
+    Content = [educkui_render_node:text(L) || L <- Lines],
+    educkui_render_node:stack(vertical, [
+        panel(<<"Server Info">>, Content, Cols, Height),
+        footer(<<" r refresh   esc back">>)
+    ]).
 
 -spec slow_log_view(#dui_state{}) -> #dui_node{}.
 slow_log_view(State) ->
@@ -2515,17 +2657,29 @@ memory_view(State) ->
         undefined -> #{};
         S -> S
     end,
-    StatsLines = [
-        kv(<<"used">>, maps:get(used, Stats, <<>>)),
-        kv(<<"peak">>, maps:get(peak, Stats, <<>>)),
-        kv(<<"rss">>, maps:get(rss, Stats, <<>>)),
-        kv(<<"frag ratio">>, maps:get(frag_ratio, Stats, <<>>)),
-        kv(<<"frag bytes">>, maps:get(frag_bytes, Stats, <<>>)),
-        kv(<<"lua">>, maps:get(lua, Stats, <<>>))
+    {Rows, Cols} = dui_redis_state:size(State),
+    Height = max(6, Rows - 4),
+    LeftW = (Cols * 55) div 100,
+    RightW = max(20, Cols - LeftW - 1),
+    Frag = to_float(maps:get(frag_ratio, Stats, <<>>)),
+    StatsContent = [
+        educkui_render_node:text(kv(<<"used">>, maps:get(used, Stats, <<>>))),
+        educkui_render_node:text(kv(<<"peak">>, maps:get(peak, Stats, <<>>))),
+        educkui_render_node:text(kv(<<"rss">>, maps:get(rss, Stats, <<>>))),
+        educkui_render_node:text(kv(<<"frag bytes">>, maps:get(frag_bytes, Stats, <<>>))),
+        educkui_render_node:text(kv(<<"lua">>, maps:get(lua, Stats, <<>>))),
+        educkui_render_node:text(<<"  frag ratio">>),
+        gauge_row(clamp01(Frag), max(10, LeftW - 2), dui_redis_theme:info())
     ],
-    TopLines = [top_key_line(K) || K <- maps:get(top_keys, Stats, [])],
-    Lines = StatsLines ++ [<<>>, <<"top keys by memory:">>] ++ TopLines,
-    lines_view(State, <<"Memory Stats">>, <<>>, Lines, <<" j/k nav   r refresh   esc back">>).
+    TopContent = [educkui_render_node:text(top_key_line(K))
+                  || K <- maps:get(top_keys, Stats, [])],
+    educkui_render_node:stack(vertical, [
+        educkui_render_node:stack(horizontal, [
+            panel(<<"Memory Stats">>, StatsContent, LeftW, Height),
+            panel(<<"Top Keys by Memory">>, TopContent, RightW, Height)
+        ]),
+        footer(<<" j/k nav   r refresh   esc back">>)
+    ]).
 
 -spec top_key_line(map()) -> binary().
 top_key_line(K) ->
@@ -2598,8 +2752,12 @@ metrics_view(State) ->
     Ops = lists:reverse([maps:get(ops, M, 0) || M <- Metrics]),
     Mem = lists:reverse([maps:get(used_memory, M, 0) || M <- Metrics]),
     HitRate = hit_rate(Current),
-    educkui_render_node:stack(vertical, [
-        educkui_render_node:text(<<" Live Metrics">>, dui_redis_theme:title()),
+    {Rows, Cols} = dui_redis_state:size(State),
+    TopH = 8,
+    ChartH = max(5, Rows - 13),
+    LeftW = (Cols * 55) div 100,
+    RightW = max(20, Cols - LeftW - 1),
+    OverviewContent = [
         educkui_render_node:text(kv(<<"ops/sec">>, maps:get(ops, Current, 0))),
         educkui_render_node:text(kv(<<"clients">>, maps:get(clients, Current, 0))),
         educkui_render_node:text(kv(<<"blocked">>, maps:get(blocked, Current, 0))),
@@ -2607,13 +2765,32 @@ metrics_view(State) ->
             iolist_to_binary(io_lib:format("~b / ~b",
                 [maps:get(hits, Current, 0), maps:get(misses, Current, 0)])))),
         educkui_render_node:text(kv(<<"used memory">>,
-            dui_redis_fmt:bytes(maps:get(used_memory, Current, 0)))),
-        educkui_render_node:text(<<" hit rate: ", (pct(HitRate))/binary>>),
-        educkui_render_node:widget(educkui_widget_gauge, #{value => HitRate}),
-        educkui_render_node:text(<<" ops/sec history:">>),
-        educkui_render_node:widget(educkui_widget_sparkline, #{values => nonempty(Ops)}),
-        educkui_render_node:text(<<" memory history:">>),
-        educkui_render_node:widget(educkui_widget_sparkline, #{values => nonempty(Mem)}),
+            dui_redis_fmt:bytes(maps:get(used_memory, Current, 0))))
+    ],
+    HitContent = [
+        educkui_render_node:text(<<"  hit rate: ", (pct(HitRate))/binary>>),
+        gauge_row(HitRate, max(10, RightW - 2), dui_redis_theme:success())
+    ],
+    ChartInner = max(1, ChartH - 3),
+    OpsCard = panel(<<"Ops/sec">>, [
+        educkui_render_node:height(
+            educkui_render_node:widget(educkui_widget_line_chart, #{
+                values => nonempty(Ops), style => dui_redis_theme:info()
+            }), ChartInner)
+    ], LeftW, ChartH),
+    MemCard = panel(<<"Memory">>, [
+        educkui_render_node:height(
+            educkui_render_node:widget(educkui_widget_line_chart, #{
+                values => nonempty(Mem), style => dui_redis_theme:success()
+            }), ChartInner)
+    ], RightW, ChartH),
+    educkui_render_node:stack(vertical, [
+        screen_header(<<"Live Metrics">>),
+        educkui_render_node:stack(horizontal, [
+            panel(<<"Overview">>, OverviewContent, LeftW, TopH),
+            panel(<<"Hit Rate">>, HitContent, RightW, TopH)
+        ]),
+        educkui_render_node:stack(horizontal, [OpsCard, MemCard]),
         footer(<<" r refresh   esc back">>)
     ]).
 
@@ -2628,6 +2805,26 @@ pct(F) ->
 -spec nonempty([number()]) -> [number()].
 nonempty([]) -> [0];
 nonempty(L) -> L.
+
+-spec to_float(term()) -> float().
+to_float(F) when is_float(F) -> F;
+to_float(I) when is_integer(I) -> float(I);
+to_float(B) when is_binary(B) ->
+    S = binary_to_list(B),
+    case string:to_float(S) of
+        {error, no_float} ->
+            case string:to_integer(S) of
+                {error, _} -> 0.0;
+                {I, _} -> float(I)
+            end;
+        {F, _} -> F
+    end;
+to_float(_) -> 0.0.
+
+-spec clamp01(number()) -> float().
+clamp01(F) when F < 0.0 -> 0.0;
+clamp01(F) when F > 1.0 -> 1.0;
+clamp01(F) -> float(F).
 
 -spec kv(binary() | string(), term()) -> binary().
 kv(Label, Value) ->
@@ -2649,13 +2846,7 @@ confirm_view(State) ->
         _ ->
             {<<"Confirm">>, <<"(y/n)">>}
     end,
-    educkui_render_node:widget(educkui_widget_dialog, #{
-        title => Title,
-        content => Content,
-        buttons => [],
-        width => 50,
-        height => 6
-    }).
+    modal(State, Title, [educkui_render_node:text(Content)], 50).
 
 %% -- keys -------------------------------------------------------------------
 
@@ -2802,14 +2993,13 @@ switch_db_view(State) ->
         undefined -> <<>>;
         _ -> educkui_lineedit:value(Edit)
     end,
-    educkui_render_node:stack(vertical, [
-        educkui_render_node:text(<<>>),
-        educkui_render_node:text(<<"  Switch Database">>, dui_redis_theme:subtitle()),
+    Content = [
         educkui_render_node:text(<<>>),
         educkui_render_node:text(<<"  db: ", Value/binary, "_">>, dui_redis_theme:info()),
         educkui_render_node:text(<<>>),
         footer(<<" enter switch   esc cancel">>)
-    ]).
+    ],
+    modal(State, <<"Switch Database">>, Content, 44).
 
 -spec displayed_pattern(#dui_state{}) -> binary().
 displayed_pattern(State) ->
@@ -2843,51 +3033,126 @@ keys_hints(State) ->
 
 -spec help_view() -> #dui_node{}.
 help_view() ->
-    Lines = [
-        <<"">>,
-        <<"    ?        toggle this help">>,
-        <<"    q        quit">>,
-        <<"    Ctrl+C   quit">>,
-        <<"    Esc      back / cancel">>,
-        <<"">>,
-        <<"  Connections">>,
-        <<"    j/k      navigate">>,
-        <<"    Enter    connect">>,
-        <<"    a/n      add connection">>,
-        <<"    e        edit connection">>,
-        <<"    d        delete connection">>,
-        <<"    r        reload from disk">>,
-        <<"">>,
-        <<"  Form">>,
-        <<"    Tab      next field">>,
-        <<"    Space    toggle checkbox">>,
-        <<"    Enter    save">>,
-        <<"    Ctrl+T   test connection">>,
-        <<"    Esc      cancel">>
-    ],
+    {LeftGroups, RightGroups} = lists:split(3, help_groups()),
     educkui_render_node:stack(vertical, [
-        educkui_render_node:text(<<" Help">>, dui_redis_theme:title())
-        | [educkui_render_node:text(Line) || Line <- Lines]
+        educkui_render_node:text(<<" Help">>, dui_redis_theme:title()),
+        educkui_render_node:text(<<>>),
+        educkui_render_node:stack(horizontal, [
+            educkui_render_node:width(help_column(LeftGroups), 42),
+            help_column(RightGroups)
+        ])
     ]).
+
+%% @doc Help content grouped by screen, split into two columns by the caller.
+-spec help_groups() -> [{binary(), [{binary(), binary()}]}].
+help_groups() ->
+    [{<<"General">>, [
+        {<<"?">>, <<"toggle help">>},
+        {<<"q">>, <<"quit">>},
+        {<<"Ctrl+C">>, <<"quit">>},
+        {<<"Esc">>, <<"back / cancel">>}
+     ]},
+     {<<"Connections">>, [
+        {<<"j/k">>, <<"navigate">>},
+        {<<"Enter">>, <<"connect">>},
+        {<<"a/n">>, <<"add connection">>},
+        {<<"e">>, <<"edit connection">>},
+        {<<"d">>, <<"delete connection">>},
+        {<<"r">>, <<"reload from disk">>}
+     ]},
+     {<<"Form">>, [
+        {<<"Tab">>, <<"next field">>},
+        {<<"Space">>, <<"toggle checkbox">>},
+        {<<"Enter">>, <<"save">>},
+        {<<"Ctrl+T">>, <<"test connection">>},
+        {<<"Esc">>, <<"cancel">>}
+     ]},
+     {<<"Keys">>, [
+        {<<"j/k">>, <<"navigate">>},
+        {<<"Enter">>, <<"view">>},
+        {<<"/">>, <<"filter">>},
+        {<<"s/S">>, <<"sort / reverse">>},
+        {<<"r">>, <<"refresh">>},
+        {<<"D">>, <<"switch db">>},
+        {<<"l">>, <<"load more">>},
+        {<<"Esc">>, <<"disconnect">>}
+     ]},
+     {<<"Detail">>, [
+        {<<"j/k">>, <<"scroll">>},
+        {<<"e">>, <<"edit">>},
+        {<<"a">>, <<"add member">>},
+        {<<"x">>, <<"remove member">>},
+        {<<"t">>, <<"set ttl">>},
+        {<<"R">>, <<"rename">>},
+        {<<"c">>, <<"copy">>},
+        {<<"d">>, <<"delete">>},
+        {<<"r">>, <<"refresh">>},
+        {<<"Esc">>, <<"back">>}
+     ]},
+     {<<"Editor">>, [
+        {<<"arrows">>, <<"move cursor">>},
+        {<<"Enter">>, <<"newline">>},
+        {<<"Ctrl+S">>, <<"save">>},
+        {<<"F2">>, <<"save (fallback)">>},
+        {<<"Esc">>, <<"cancel">>}
+     ]}].
+
+-spec help_column([{binary(), [{binary(), binary()}]}]) -> #dui_node{}.
+help_column(Groups) ->
+    Lines = lists:flatmap(
+        fun({Title, Entries}) ->
+            [[{<<" ", Title/binary>>, dui_redis_theme:key_accent()}]]
+            ++ [help_line(K, D) || {K, D} <- Entries]
+            ++ [[]]
+        end, Groups),
+    educkui_render_node:widget(educkui_widget_text_view, #{lines => Lines}).
+
+-spec help_line(binary(), binary()) -> [{binary(), #dui_style{}}].
+help_line(Key, Desc) ->
+    [{dui_redis_theme:pad(Key, 11), dui_redis_theme:help_key()},
+     {<<"  ", Desc/binary>>, dui_redis_theme:help()}].
 
 -spec status_bar(#dui_state{}) -> #dui_node{}.
 status_bar(State) ->
-    {Text, Style} = case dui_redis_state:status(State) of
-        undefined -> {hint(State), dui_redis_theme:dim()};
-        {info, Msg} -> {Msg, dui_redis_theme:info()};
-        {error, Msg} -> {Msg, dui_redis_theme:error()}
-    end,
+    case dui_redis_state:status(State) of
+        undefined -> hint_bar(State);
+        {info, Msg} -> bar_text(Msg, dui_redis_theme:info());
+        {error, Msg} -> bar_text(Msg, dui_redis_theme:error())
+    end.
+
+-spec bar_text(binary(), #dui_style{}) -> #dui_node{}.
+bar_text(Text, Style) ->
     educkui_render_node:height(educkui_render_node:text(Text, Style), 1).
 
--spec hint(#dui_state{}) -> binary().
-hint(State) ->
+%% @doc Default status bar: connection state, database, terminal size and
+%% global shortcuts as colored spans.
+-spec hint_bar(#dui_state{}) -> #dui_node{}.
+hint_bar(State) ->
     {Rows, Cols} = dui_redis_state:size(State),
-    Connected = case dui_redis_state:connected(State) of
-        true -> <<"connected">>;
-        false -> <<"disconnected">>
+    {StatusText, StatusStyle} = case dui_redis_state:connected(State) of
+        true -> {<<" connected">>, dui_redis_theme:success()};
+        false -> {<<" disconnected">>, dui_redis_theme:dim()}
     end,
-    iolist_to_binary(io_lib:format(
-        " ~s   ~bx~b   ? help   q quit", [Connected, Cols, Rows])).
+    DbSpans = case dui_redis_state:connected(State) of
+        true ->
+            Db = case dui_redis_state:current_conn(State) of
+                undefined -> 0;
+                Conn -> maps:get(db, Conn, 0)
+            end,
+            [{<<"   db ">>, dui_redis_theme:dim()},
+             {integer_to_binary(Db), dui_redis_theme:title()}];
+        false ->
+            []
+    end,
+    Size = iolist_to_binary(io_lib:format("~bx~b", [Cols, Rows])),
+    Spans = [{StatusText, StatusStyle}]
+        ++ DbSpans
+        ++ [{<<"   ">>, dui_redis_theme:dim()},
+            {Size, dui_redis_theme:meta_dim()},
+            {<<"   ">>, dui_redis_theme:dim()},
+            {<<"? help   q quit">>, dui_redis_theme:help()}],
+    educkui_render_node:height(
+        educkui_render_node:widget(educkui_widget_text_view, #{lines => [Spans]}), 1).
 
 -spec footer(binary()) -> #dui_node{}.
 footer(Text) ->

@@ -66,6 +66,7 @@
     cluster :: map() | undefined,
     groups = [] :: [map()],
     status :: {info | error, binary()} | undefined,
+    status_tick = 0 :: non_neg_integer(),
     loading = false :: boolean(),
     show_help = false :: boolean(),
     ticks = 0 :: non_neg_integer()

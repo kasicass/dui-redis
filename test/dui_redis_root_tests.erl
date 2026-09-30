@@ -13,7 +13,7 @@ skeleton_renders_test() ->
 help_toggle_test() ->
     {Pid, Dir} = start_root(),
     ok = educkui_test:send_key(Pid, <<"?">>),
-    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"toggle this help">>)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"toggle help">>)),
     ok = educkui_test:send_key(Pid, esc),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
         fun(S) -> S#dui_state.show_help =:= false end, 50)),

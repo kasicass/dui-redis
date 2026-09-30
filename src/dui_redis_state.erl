@@ -114,6 +114,7 @@
     groups/1,
     set_groups/2,
     status/1,
+    status_tick/1,
     show_help/1,
     config_path/1,
     cli/1,
@@ -509,6 +510,9 @@ set_groups(State, G) -> State#dui_state{groups = G, row_selected = 0, loading = 
 -spec status(#dui_state{}) -> {info | error, binary()} | undefined.
 status(#dui_state{status = Status}) -> Status.
 
+-spec status_tick(#dui_state{}) -> non_neg_integer().
+status_tick(#dui_state{status_tick = Tick}) -> Tick.
+
 -spec show_help(#dui_state{}) -> boolean().
 show_help(#dui_state{show_help = Show}) -> Show.
 
@@ -532,8 +536,15 @@ put_config(State, Config) ->
     }.
 
 -spec set_status(#dui_state{}, info | error, binary() | string()) -> #dui_state{}.
-set_status(State, Level, Msg) ->
-    State#dui_state{status = {Level, to_binary(Msg)}}.
+set_status(#dui_state{loading = Loading} = State, Level, Msg) ->
+    %% A failure ends any pending load so the spinner stops.
+    Loading1 = case Level of
+        error -> false;
+        _ -> Loading
+    end,
+    State#dui_state{status = {Level, to_binary(Msg)},
+                    status_tick = State#dui_state.ticks,
+                    loading = Loading1}.
 
 -spec clear_status(#dui_state{}) -> #dui_state{}.
 clear_status(State) ->
@@ -553,7 +564,8 @@ close_help(State) ->
 
 -spec set_screen(#dui_state{}, atom()) -> #dui_state{}.
 set_screen(State, Screen) ->
-    State#dui_state{screen = Screen, show_help = false, status = undefined}.
+    State#dui_state{screen = Screen, show_help = false, status = undefined,
+                    loading = false}.
 
 -spec set_size(#dui_state{}, pos_integer(), pos_integer()) -> #dui_state{}.
 set_size(State, Rows, Cols) ->
