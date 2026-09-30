@@ -1907,7 +1907,8 @@ has_ctrl_like(Mods) ->
 -spec view(#dui_state{}) -> #dui_node{}.
 view(State) ->
     educkui_render_node:overlay([
-        educkui_render_node:component(dui_mouse_layer, dui_redis_mouse),
+        educkui_render_node:component(dui_mouse_layer, dui_redis_mouse,
+                                      #{focusable => false}),
         educkui_render_node:stack(vertical, [
             title_bar(State),
             body(State),
@@ -2008,26 +2009,14 @@ modal(State, Title, Content, Width0) ->
     MaxH = max(3, Rows - 4),
     Height = min(NeededH, MaxH),
     Lines = lists:sublist(Content, 1, max(0, Height - 3)),
-    TitleNode = educkui_render_node:text(
-        <<" ", Title/binary>>, dui_redis_theme:title()),
-    Inner = educkui_render_node:stack(vertical, [TitleNode | Lines]),
-    Box = educkui_render_node:widget(educkui_widget_block, #{
-        border => true,
-        border_style => dui_redis_theme:border()
-    }),
-    Border = educkui_render_node:width(
-        educkui_render_node:height(Box, Height), Width),
-    ContentBox = educkui_render_node:box(
-        [educkui_render_node:at(2, 1, Inner)],
-        [{width, Width}, {height, Height}]),
     educkui_render_node:height(
-        educkui_render_node:overlay([center(Border), center(ContentBox)]), auto).
-
-%% @doc Centers a fixed-size node both horizontally and vertically.
--spec center(#dui_node{}) -> #dui_node{}.
-center(Node) ->
-    Horizontal = educkui_render_node:stack(horizontal, [Node], [{align, center}]),
-    educkui_render_node:stack(vertical, [Horizontal], [{align, center}]).
+        educkui_render_node:widget(educkui_widget_dialog, #{
+            title => Title,
+            content_nodes => Lines,
+            buttons => [],
+            width => Width,
+            height => Height
+        }), auto).
 
 %% @doc Renders a bordered panel with a title and content lines, filling the
 %% given width and height. Unlike `modal/4' it is not centered.
@@ -2327,7 +2316,7 @@ conn_spans(Conn, Selected) ->
 form_view(State) ->
     Form = dui_redis_state:conn_form(State),
     Focus = dui_redis_form:focus(Form),
-    Fields = dui_redis_form:fields(),
+    Fields = dui_redis_form:fields(Form),
     FieldNodes = lists:flatmap(
         fun({Field, Index}) ->
             focused_field_nodes(Field, Index, Focus, Form)

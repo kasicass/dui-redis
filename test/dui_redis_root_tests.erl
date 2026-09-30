@@ -166,6 +166,21 @@ render_steps() ->
         {help, [{key, <<"?">>}]}
     ].
 
+%% Tab reaches the root (no focusable child components) and advances the form.
+form_tab_advances_field_test() ->
+    Dir = mk_tmp(),
+    Path = filename:join(Dir, "config.json"),
+    Pid = educkui_test:start(#{root => dui_redis_root, size => {30, 100},
+                               init_args => [{opts, #{config_path => Path}}]}),
+    ok = educkui_test:send_event(Pid, educkui_event:resize(100, 30)),
+    ok = educkui_test:send_key(Pid, <<"a">>),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.screen =:= connection_form end, 100)),
+    ok = educkui_test:send_key(Pid, tab),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> dui_redis_form:focus(dui_redis_state:conn_form(S)) =:= 1 end, 100)),
+    cleanup(Pid, Dir).
+
 initial_resize_delivered_test() ->
     {Pid, Dir} = start_root(),
     ?assertEqual(ok, educkui_test:wait_until(Pid,

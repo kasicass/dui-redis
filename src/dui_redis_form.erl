@@ -8,7 +8,7 @@
 -export([
     new_add/0,
     new_edit/1,
-    fields/0,
+    fields/1,
     mode/1,
     id/1,
     focus/1,
@@ -63,16 +63,37 @@ build(Mode, Id, Conn) ->
 %% Accessors
 %% ---------------------------------------------------------------------------
 
-%% @doc Ordered field specifications.
--spec fields() -> [map()].
-fields() ->
+%% @doc Ordered field specifications. The TLS certificate fields are only
+%% shown when the TLS checkbox is enabled.
+-spec fields(form()) -> [map()].
+fields(Form) ->
     [#{id => name, label => <<"Name">>, type => text},
      #{id => host, label => <<"Host">>, type => text},
      #{id => port, label => <<"Port">>, type => text},
      #{id => username, label => <<"Username">>, type => text},
      #{id => password, label => <<"Password">>, type => password},
      #{id => cluster, label => <<"Cluster Mode">>, type => bool},
-     #{id => db, label => <<"Database">>, type => text}].
+     #{id => tls, label => <<"TLS">>, type => bool}]
+    ++ tls_fields(Form)
+    ++ [#{id => db, label => <<"Database">>, type => text}].
+
+-spec tls_fields(form()) -> [map()].
+tls_fields(Form) ->
+    case form_bool(Form, tls) of
+        true ->
+            [#{id => tls_ca, label => <<"CA certificate">>, type => text},
+             #{id => tls_cert, label => <<"Client certificate">>, type => text},
+             #{id => tls_key, label => <<"Client key">>, type => text},
+             #{id => tls_skip_verify, label => <<"Skip TLS verify">>, type => bool}];
+        false ->
+            []
+    end.
+
+-spec form_bool(form(), atom()) -> boolean().
+form_bool(#{values := Values}, Id) ->
+    maps:get(Id, Values, false) =:= true;
+form_bool(_Form, _Id) ->
+    false.
 
 -spec mode(form()) -> add | edit.
 mode(#{mode := Mode}) -> Mode.
@@ -96,8 +117,8 @@ value(#{values := Values}, FieldId) -> maps:get(FieldId, Values, undefined).
 cursor(#{cursor := Cursor}) -> Cursor.
 
 -spec focused_field(form()) -> map().
-focused_field(#{focus := Focus}) ->
-    lists:nth(Focus + 1, fields()).
+focused_field(#{focus := Focus} = Form) ->
+    lists:nth(Focus + 1, fields(Form)).
 
 %% ---------------------------------------------------------------------------
 %% Editing
@@ -151,11 +172,11 @@ home(Form) ->
 
 -spec focus_next(form()) -> form().
 focus_next(Form) ->
-    set_focus(Form, (focus(Form) + 1) rem length(fields())).
+    set_focus(Form, (focus(Form) + 1) rem length(fields(Form))).
 
 -spec focus_prev(form()) -> form().
 focus_prev(Form) ->
-    Count = length(fields()),
+    Count = length(fields(Form)),
     set_focus(Form, (focus(Form) - 1 + Count) rem Count).
 
 -spec toggle(form()) -> form().
@@ -164,7 +185,9 @@ toggle(Form) ->
         bool ->
             FieldId = field_id(Form),
             Values = values(Form),
-            Form#{values := Values#{FieldId => not maps:get(FieldId, Values, false)}};
+            Form1 = Form#{values := Values#{FieldId => not maps:get(FieldId, Values, false)}},
+            %% Toggling TLS adds/removes fields; keep focus in range.
+            Form1#{focus := min(focus(Form1), length(fields(Form1)) - 1)};
         _ ->
             Form
     end.
@@ -207,6 +230,7 @@ validate_port(V) ->
 -spec to_connection(form()) -> map().
 to_connection(Form) ->
     V = values(Form),
+    UseTls = maps:get(tls, V, false) =:= true,
     #{id => id(Form),
       name => maps:get(name, V, <<>>),
       host => maps:get(host, V, <<>>),
@@ -215,7 +239,17 @@ to_connection(Form) ->
       password => maps:get(password, V, <<>>),
       db => int_or(maps:get(db, V, <<>>), 0),
       use_cluster => maps:get(cluster, V, false),
-      use_tls => false}.
+      use_tls => UseTls,
+      tls_config => tls_config(V, UseTls)}.
+
+-spec tls_config(map(), boolean()) -> map() | undefined.
+tls_config(_V, false) ->
+    undefined;
+tls_config(V, true) ->
+    #{ca_file => maps:get(tls_ca, V, <<>>),
+      cert_file => maps:get(tls_cert, V, <<>>),
+      key_file => maps:get(tls_key, V, <<>>),
+      insecure_skip_verify => maps:get(tls_skip_verify, V, false) =:= true}.
 
 %% ---------------------------------------------------------------------------
 %% Internal
@@ -232,7 +266,7 @@ field_id(Form) ->
 -spec set_focus(form(), non_neg_integer()) -> form().
 set_focus(Form, Focus) ->
     Values = values(Form),
-    Field = lists:nth(Focus + 1, fields()),
+    Field = lists:nth(Focus + 1, fields(Form)),
     Form#{focus := Focus,
           cursor := cursor_for(Values, Field),
           error := undefined}.
@@ -260,14 +294,25 @@ edit_focused(Form, Fun) ->
 -spec initial_values(map() | undefined) -> map().
 initial_values(undefined) ->
     #{name => <<>>, host => <<"localhost">>, port => <<"6379">>,
-      username => <<>>, password => <<>>, cluster => false, db => <<"0">>};
+      username => <<>>, password => <<>>, cluster => false,
+      tls => false, tls_ca => <<>>, tls_cert => <<>>, tls_key => <<>>,
+      tls_skip_verify => false, db => <<"0">>};
 initial_values(Conn) ->
+    TlsCfg = case maps:get(tls_config, Conn, undefined) of
+        M when is_map(M) -> M;
+        _ -> #{}
+    end,
     #{name => to_bin(maps:get(name, Conn, <<>>)),
       host => to_bin(maps:get(host, Conn, <<"localhost">>)),
       port => integer_to_binary(maps:get(port, Conn, 6379)),
       username => to_bin(maps:get(username, Conn, <<>>)),
       password => to_bin(maps:get(password, Conn, <<>>)),
       cluster => maps:get(use_cluster, Conn, false),
+      tls => maps:get(use_tls, Conn, false),
+      tls_ca => to_bin(maps:get(ca_file, TlsCfg, <<>>)),
+      tls_cert => to_bin(maps:get(cert_file, TlsCfg, <<>>)),
+      tls_key => to_bin(maps:get(key_file, TlsCfg, <<>>)),
+      tls_skip_verify => maps:get(insecure_skip_verify, TlsCfg, false),
       db => integer_to_binary(maps:get(db, Conn, 0))}.
 
 -spec parse_int(term()) -> {ok, integer()} | error.

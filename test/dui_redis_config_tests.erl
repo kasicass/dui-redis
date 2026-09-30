@@ -187,3 +187,22 @@ groups_test() ->
     ok = dui_redis_config:delete_group(Path, <<"Local">>),
     ?assertEqual({ok, []}, dui_redis_config:list_groups(Path)),
     cleanup(Dir).
+
+%% JSON gives tls_config binary keys, but tls_options/1 reads atom keys, so
+%% normalize_connection must convert them.
+normalize_connection_tls_test() ->
+    C = #{<<"id">> => 1, <<"name">> => <<"T">>, <<"host">> => <<"h">>,
+          <<"port">> => 6379,
+          <<"use_tls">> => true,
+          <<"tls_config">> => #{<<"ca_file">> => <<"/a">>,
+                                <<"cert_file">> => <<"/c">>,
+                                <<"key_file">> => <<"/k">>,
+                                <<"insecure_skip_verify">> => true}},
+    N = dui_redis_config:normalize_connection(C),
+    ?assertEqual(#{ca_file => <<"/a">>, cert_file => <<"/c">>,
+                   key_file => <<"/k">>, insecure_skip_verify => true},
+                 maps:get(tls_config, N)),
+    Opts = dui_redis_client:build_options(N),
+    {tls, TlsOpts} = lists:keyfind(tls, 1, Opts),
+    ?assertEqual([{verify, verify_none}, {keyfile, "/k"},
+                  {certfile, "/c"}, {cacertfile, "/a"}], TlsOpts).

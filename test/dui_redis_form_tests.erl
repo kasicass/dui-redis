@@ -37,7 +37,7 @@ focus_cycles_test() ->
     F2 = dui_redis_form:focus_prev(F1),
     ?assertEqual(0, dui_redis_form:focus(F2)),
     %% wrap-around
-    Count = length(dui_redis_form:fields()),
+    Count = length(dui_redis_form:fields(F0)),
     F3 = dui_redis_form:focus_prev(F0),
     ?assertEqual(Count - 1, dui_redis_form:focus(F3)).
 
@@ -79,7 +79,50 @@ to_connection_test() ->
     ?assertEqual(0, maps:get(db, Conn)),
     ?assertEqual(false, maps:get(use_cluster, Conn)),
     ?assertEqual(<<>>, maps:get(username, Conn)),
-    ?assertEqual(<<>>, maps:get(password, Conn)).
+    ?assertEqual(<<>>, maps:get(password, Conn)),
+    ?assertEqual(false, maps:get(use_tls, Conn)),
+    ?assertEqual(undefined, maps:get(tls_config, Conn)).
+
+%% The TLS checkbox reveals the certificate fields, and to_connection carries
+%% them through.
+tls_fields_test() ->
+    F0 = dui_redis_form:new_add(),
+    F1 = focus_next_n(F0, 6),
+    ?assertEqual(<<"TLS">>, maps:get(label, dui_redis_form:focused_field(F1))),
+    F2 = dui_redis_form:toggle(F1),
+    ?assertEqual(true, dui_redis_form:value(F2, tls)),
+    Ids = [maps:get(id, F) || F <- dui_redis_form:fields(F2)],
+    ?assert(lists:member(tls_ca, Ids)),
+    ?assert(lists:member(tls_cert, Ids)),
+    ?assert(lists:member(tls_key, Ids)),
+    ?assert(lists:member(tls_skip_verify, Ids)),
+    %% toggling TLS off removes the certificate fields
+    F3 = dui_redis_form:toggle(F2),
+    Ids3 = [maps:get(id, F) || F <- dui_redis_form:fields(F3)],
+    ?assertNot(lists:member(tls_ca, Ids3)).
+
+to_connection_tls_test() ->
+    F0 = dui_redis_form:new_add(),
+    F1 = dui_redis_form:toggle(focus_next_n(F0, 6)),
+    Conn = dui_redis_form:to_connection(F1),
+    ?assertEqual(true, maps:get(use_tls, Conn)),
+    ?assertMatch(#{ca_file := <<>>, cert_file := <<>>, key_file := <<>>,
+                   insecure_skip_verify := false}, maps:get(tls_config, Conn)).
+
+new_edit_tls_test() ->
+    Conn = #{id => 1, name => <<"T">>, host => <<"h">>, port => 6379,
+             use_tls => true,
+             tls_config => #{cert_file => <<"/c">>, key_file => <<"/k">>,
+                             ca_file => <<"/a">>, insecure_skip_verify => true}},
+    F = dui_redis_form:new_edit(Conn),
+    ?assertEqual(true, dui_redis_form:value(F, tls)),
+    ?assertEqual(<<"/a">>, dui_redis_form:value(F, tls_ca)),
+    ?assertEqual(<<"/c">>, dui_redis_form:value(F, tls_cert)),
+    ?assertEqual(<<"/k">>, dui_redis_form:value(F, tls_key)),
+    ?assertEqual(true, dui_redis_form:value(F, tls_skip_verify)).
+
+focus_next_n(Form, N) ->
+    lists:foldl(fun(_, F) -> dui_redis_form:focus_next(F) end, Form, lists:seq(1, N)).
 
 set_error_clears_on_edit_test() ->
     F0 = dui_redis_form:set_error(<<"boom">>, dui_redis_form:new_add()),

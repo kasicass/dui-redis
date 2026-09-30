@@ -419,7 +419,7 @@ normalize_connection(C) when is_map(C) ->
       db => value(<<"db">>, C, 0),
       use_cluster => value(<<"use_cluster">>, C, false),
       use_tls => value(<<"use_tls">>, C, false),
-      tls_config => opt(value(<<"tls_config">>, C, undefined)),
+      tls_config => normalize_tls_config(value(<<"tls_config">>, C, undefined)),
       created_at => opt(value(<<"created_at">>, C, undefined)),
       updated_at => opt(value(<<"updated_at">>, C, undefined))};
 normalize_connection(_C) ->
@@ -488,6 +488,18 @@ list_value(Key, Data, Default) ->
         L when is_list(L) -> L;
         _ -> Default
     end.
+
+%% @doc Normalizes a stored `tls_config' map to atom keys (the JSON
+%% round-trip yields binary keys, but `dui_redis_client:tls_options/1' reads
+%% atom keys).
+-spec normalize_tls_config(term()) -> map() | undefined.
+normalize_tls_config(M) when is_map(M) ->
+    #{ca_file => value(<<"ca_file">>, M, <<>>),
+      cert_file => value(<<"cert_file">>, M, <<>>),
+      key_file => value(<<"key_file">>, M, <<>>),
+      insecure_skip_verify => value(<<"insecure_skip_verify">>, M, false)};
+normalize_tls_config(_) ->
+    undefined.
 
 %% @doc Normalizes the JSON round-trip of the atom `undefined' (encoded by
 %% `json:encode/1' as the string `"undefined"') back to `undefined'.
