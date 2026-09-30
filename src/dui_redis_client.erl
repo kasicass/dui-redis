@@ -15,7 +15,12 @@
     start_link/0,
     connect/1, disconnect/0, test/1, select_db/1,
     ping/0, q/1, q/2, is_connected/0, current/0,
-    scan_keys/3, value_preview/1, db_size/0,
+    scan_keys/3, value_preview/1, value_detail/1, db_size/0,
+    set_string/3, delete_key/1, rename_key/2, copy_key/3, set_ttl/2,
+    flush_db/0, list_push/2, list_set/3, list_remove/2,
+    set_add/2, set_remove/2, zset_add/3, zset_remove/2,
+    hash_set/3, hash_delete/2, stream_add/2, stream_delete/2,
+    json_set/2, memory_usage/1, key_ttl/1,
     build_options/1, stop/0
 ]).
 
@@ -26,6 +31,8 @@
 -define(SCAN_TIMEOUT, 20000).
 -define(PREVIEW_MAX_ITEMS, 100).
 -define(PREVIEW_MAX_BYTES, 65536).
+-define(DETAIL_MAX_ITEMS, 1000).
+-define(DETAIL_MAX_BYTES, 1048576).
 -define(PROBE_BYTES, 256).
 
 %% ---------------------------------------------------------------------------
@@ -81,9 +88,89 @@ scan_keys(Pattern, Cursor, Count) ->
 -spec value_preview(binary()) -> {ok, map()} | {error, term()}.
 value_preview(Key) -> call({value_preview, Key}, ?SCAN_TIMEOUT).
 
+%% @doc Returns a larger bounded value for the detail screen (1000 items / 1 MB).
+-spec value_detail(binary()) -> {ok, map()} | {error, term()}.
+value_detail(Key) -> call({value_detail, Key}, ?SCAN_TIMEOUT).
+
 %% @doc Returns the number of keys in the current database.
 -spec db_size() -> {ok, non_neg_integer()} | {error, term()}.
 db_size() -> call(db_size).
+
+%% @doc SETs a string value, optionally with a TTL in seconds.
+-spec set_string(binary(), binary(), integer()) -> {ok, term()} | {error, term()}.
+set_string(Key, Value, TtlSeconds) ->
+    Cmd = case TtlSeconds of
+        T when is_integer(T), T > 0 ->
+            [<<"SET">>, Key, Value, <<"EX">>, integer_to_binary(T)];
+        _ ->
+            [<<"SET">>, Key, Value]
+    end,
+    q(Cmd).
+
+-spec delete_key(binary()) -> {ok, term()} | {error, term()}.
+delete_key(Key) -> q([<<"DEL">>, Key]).
+
+-spec rename_key(binary(), binary()) -> {ok, term()} | {error, term()}.
+rename_key(OldKey, NewKey) -> q([<<"RENAME">>, OldKey, NewKey]).
+
+-spec copy_key(binary(), binary(), boolean()) -> {ok, term()} | {error, term()}.
+copy_key(Src, Dst, Replace) ->
+    Cmd = case Replace of
+        true -> [<<"COPY">>, Src, Dst, <<"REPLACE">>];
+        false -> [<<"COPY">>, Src, Dst]
+    end,
+    q(Cmd).
+
+-spec set_ttl(binary(), integer()) -> {ok, term()} | {error, term()}.
+set_ttl(Key, Seconds) when is_integer(Seconds), Seconds > 0 ->
+    q([<<"EXPIRE">>, Key, integer_to_binary(Seconds)]);
+set_ttl(Key, _Seconds) ->
+    q([<<"PERSIST">>, Key]).
+
+-spec flush_db() -> {ok, term()} | {error, term()}.
+flush_db() -> q([<<"FLUSHDB">>]).
+
+-spec list_push(binary(), binary()) -> {ok, term()} | {error, term()}.
+list_push(Key, Value) -> q([<<"RPUSH">>, Key, Value]).
+
+-spec list_set(binary(), integer(), binary()) -> {ok, term()} | {error, term()}.
+list_set(Key, Index, Value) -> q([<<"LSET">>, Key, integer_to_binary(Index), Value]).
+
+-spec list_remove(binary(), binary()) -> {ok, term()} | {error, term()}.
+list_remove(Key, Value) -> q([<<"LREM">>, Key, <<"1">>, Value]).
+
+-spec set_add(binary(), binary()) -> {ok, term()} | {error, term()}.
+set_add(Key, Member) -> q([<<"SADD">>, Key, Member]).
+
+-spec set_remove(binary(), binary()) -> {ok, term()} | {error, term()}.
+set_remove(Key, Member) -> q([<<"SREM">>, Key, Member]).
+
+-spec zset_add(binary(), number(), binary()) -> {ok, term()} | {error, term()}.
+zset_add(Key, Score, Member) -> q([<<"ZADD">>, Key, number_bin(Score), Member]).
+
+-spec zset_remove(binary(), binary()) -> {ok, term()} | {error, term()}.
+zset_remove(Key, Member) -> q([<<"ZREM">>, Key, Member]).
+
+-spec hash_set(binary(), binary(), binary()) -> {ok, term()} | {error, term()}.
+hash_set(Key, Field, Value) -> q([<<"HSET">>, Key, Field, Value]).
+
+-spec hash_delete(binary(), binary()) -> {ok, term()} | {error, term()}.
+hash_delete(Key, Field) -> q([<<"HDEL">>, Key, Field]).
+
+-spec stream_add(binary(), [{term(), term()}]) -> {ok, term()} | {error, term()}.
+stream_add(Key, Fields) -> q([<<"XADD">>, Key, <<"*">> | flat_fields(Fields)]).
+
+-spec stream_delete(binary(), binary()) -> {ok, term()} | {error, term()}.
+stream_delete(Key, Id) -> q([<<"XDEL">>, Key, Id]).
+
+-spec json_set(binary(), binary()) -> {ok, term()} | {error, term()}.
+json_set(Key, Value) -> q([<<"JSON.SET">>, Key, <<"$">>, Value]).
+
+-spec memory_usage(binary()) -> {ok, term()} | {error, term()}.
+memory_usage(Key) -> q([<<"MEMORY">>, <<"USAGE">>, Key]).
+
+-spec key_ttl(binary()) -> {ok, term()} | {error, term()}.
+key_ttl(Key) -> q([<<"TTL">>, Key]).
 
 -spec stop() -> ok.
 stop() -> gen_server:stop(?SERVER).
@@ -144,6 +231,8 @@ handle_call({scan_keys, Pattern, Cursor, Count}, _From, State) ->
     {reply, with_conn(State, fun(Pid) -> do_scan_keys(Pid, Pattern, Cursor, Count) end), State};
 handle_call({value_preview, Key}, _From, State) ->
     {reply, with_conn(State, fun(Pid) -> do_value_preview(Pid, Key) end), State};
+handle_call({value_detail, Key}, _From, State) ->
+    {reply, with_conn(State, fun(Pid) -> do_value_detail(Pid, Key) end), State};
 handle_call(db_size, _From, State) ->
     {reply, with_conn(State, fun do_db_size/1), State};
 handle_call(_Request, _From, State) ->
@@ -395,10 +484,18 @@ zscore(_) -> undefined.
 
 -spec do_value_preview(pid(), binary()) -> {ok, map()} | {error, term()}.
 do_value_preview(Pid, Key) ->
+    fetch_bounded(Pid, Key, ?PREVIEW_MAX_ITEMS, ?PREVIEW_MAX_BYTES).
+
+-spec do_value_detail(pid(), binary()) -> {ok, map()} | {error, term()}.
+do_value_detail(Pid, Key) ->
+    fetch_bounded(Pid, Key, ?DETAIL_MAX_ITEMS, ?DETAIL_MAX_BYTES).
+
+-spec fetch_bounded(pid(), binary(), pos_integer(), pos_integer()) ->
+    {ok, map()} | {error, term()}.
+fetch_bounded(Pid, Key, MaxItems, MaxBytes) ->
     case eredis:q(Pid, [<<"TYPE">>, Key]) of
         {ok, TypeBin} ->
-            fetch_value(Pid, Key, dui_redis_type:to_type(TypeBin),
-                        ?PREVIEW_MAX_ITEMS, ?PREVIEW_MAX_BYTES);
+            fetch_value(Pid, Key, dui_redis_type:to_type(TypeBin), MaxItems, MaxBytes);
         {error, Reason} ->
             {error, Reason}
     end.
@@ -594,3 +691,18 @@ to_float(Bin) when is_binary(Bin) ->
         end
     end;
 to_float(_Other) -> 0.0.
+
+-spec number_bin(number()) -> binary().
+number_bin(I) when is_integer(I) -> integer_to_binary(I);
+number_bin(F) -> iolist_to_binary(io_lib:format("~p", [F])).
+
+-spec flat_fields([{term(), term()}]) -> [term()].
+flat_fields(Fields) ->
+    lists:flatmap(fun({K, V}) -> [to_bin(K), to_bin(V)] end, Fields).
+
+-spec to_bin(term()) -> binary().
+to_bin(B) when is_binary(B) -> B;
+to_bin(L) when is_list(L) -> unicode:characters_to_binary(L);
+to_bin(A) when is_atom(A) -> atom_to_binary(A, utf8);
+to_bin(I) when is_integer(I) -> integer_to_binary(I);
+to_bin(Other) -> iolist_to_binary(io_lib:format("~p", [Other])).

@@ -97,6 +97,33 @@ live_scan_and_preview() ->
     ?assertEqual([{<<"f">>, <<"v">>}], maps:get(items, HV)),
     ok = dui_redis_client:disconnect().
 
+live_write_ops_test_() ->
+    case redis_available() of
+        true -> {timeout, 30, fun live_write_ops/0};
+        false -> []
+    end.
+
+live_write_ops() ->
+    ensure_client(),
+    ok = dui_redis_client:connect(#{host => <<"localhost">>, port => 6379, db => 0}),
+    {ok, _} = dui_redis_client:q([<<"FLUSHDB">>]),
+    {ok, _} = dui_redis_client:set_string(<<"m3:str">>, <<"v1">>, 0),
+    {ok, D} = dui_redis_client:value_detail(<<"m3:str">>),
+    ?assertEqual(<<"v1">>, maps:get(text, D)),
+    {ok, _} = dui_redis_client:set_ttl(<<"m3:str">>, 100),
+    ?assertMatch({ok, _}, dui_redis_client:key_ttl(<<"m3:str">>)),
+    {ok, _} = dui_redis_client:rename_key(<<"m3:str">>, <<"m3:str2">>),
+    {ok, _} = dui_redis_client:copy_key(<<"m3:str2">>, <<"m3:str3">>, false),
+    {ok, _} = dui_redis_client:list_push(<<"m3:list">>, <<"a">>),
+    {ok, _} = dui_redis_client:hash_set(<<"m3:hash">>, <<"f">>, <<"v">>),
+    {ok, _} = dui_redis_client:set_add(<<"m3:set">>, <<"m">>),
+    {ok, _} = dui_redis_client:zset_add(<<"m3:zset">>, 1.5, <<"m">>),
+    {ok, _} = dui_redis_client:q([<<"XADD">>, <<"m3:stream">>, <<"*">>, <<"f">>, <<"v">>]),
+    ?assertMatch({ok, _}, dui_redis_client:delete_key(<<"m3:str3">>)),
+    {ok, V} = dui_redis_client:value_detail(<<"m3:list">>),
+    ?assertEqual([<<"a">>], maps:get(items, V)),
+    ok = dui_redis_client:disconnect().
+
 %% ---------------------------------------------------------------------------
 
 ensure_client() ->

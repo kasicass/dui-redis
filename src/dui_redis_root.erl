@@ -130,6 +130,58 @@ update({filter_debounced, Seq, Pattern}, State) ->
         false ->
             {State, []}
     end;
+update({detail_loaded, Key, {ok, Value}}, State) ->
+    S1 = dui_redis_state:set_current_key(State, find_key_map(State, Key)),
+    S2 = dui_redis_state:set_current_value(S1, Value),
+    S3 = dui_redis_state:set_detail_scroll(S2, 0),
+    {dui_redis_state:set_screen(S3, key_detail), []};
+update({detail_loaded, _Key, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({value_saved, {ok, _}}, State) ->
+    S1 = dui_redis_state:set_screen(State, key_detail),
+    S2 = dui_redis_state:set_status(S1, info, <<"Value saved">>),
+    refresh_detail(S2);
+update({value_saved, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({key_deleted, _Key, {ok, _}}, State) ->
+    S1 = dui_redis_state:set_screen(State, keys),
+    S2 = dui_redis_state:set_status(S1, info, <<"Key deleted">>),
+    reload_keys(S2);
+update({key_deleted, _Key, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({key_renamed, {ok, _}}, State) ->
+    S1 = dui_redis_state:set_screen(State, keys),
+    S2 = dui_redis_state:set_status(S1, info, <<"Key renamed">>),
+    reload_keys(S2);
+update({key_renamed, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({key_copied, {ok, _}}, State) ->
+    S1 = dui_redis_state:set_screen(State, keys),
+    S2 = dui_redis_state:set_status(S1, info, <<"Key copied">>),
+    reload_keys(S2);
+update({key_copied, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({ttl_set, {ok, _}}, State) ->
+    S1 = dui_redis_state:set_screen(State, key_detail),
+    S2 = dui_redis_state:set_status(S1, info, <<"TTL updated">>),
+    refresh_detail(S2);
+update({ttl_set, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({db_flushed, {ok, _}}, State) ->
+    S1 = dui_redis_state:set_status(State, info, <<"Database flushed">>),
+    reload_keys(S1);
+update({db_flushed, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({collection_added, {ok, _}}, State) ->
+    S1 = dui_redis_state:set_status(State, info, <<"Item added">>),
+    refresh_detail(S1);
+update({collection_added, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({collection_removed, {ok, _}}, State) ->
+    S1 = dui_redis_state:set_status(State, info, <<"Item removed">>),
+    refresh_detail(S1);
+update({collection_removed, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
 update({key, Key, Mods}, State) ->
     handle_event(Key, Mods, State);
 update(_Msg, State) ->
@@ -186,6 +238,8 @@ handle_global(Key, Mods, State) ->
 -spec text_entry_active(#dui_state{}) -> boolean().
 text_entry_active(#dui_state{screen = connection_form}) -> true;
 text_entry_active(#dui_state{screen = switch_db}) -> true;
+text_entry_active(#dui_state{screen = edit_value}) -> true;
+text_entry_active(#dui_state{screen = prompt}) -> true;
 text_entry_active(#dui_state{filter_active = true}) -> true;
 text_entry_active(_State) -> false.
 
@@ -193,6 +247,13 @@ text_entry_active(_State) -> false.
 handle_escape(#dui_state{filter_active = true} = State) ->
     S1 = dui_redis_state:set_filter_active(State, false),
     {dui_redis_state:set_filter_edit(S1, undefined), []};
+handle_escape(#dui_state{screen = key_detail} = State) ->
+    {dui_redis_state:set_screen(State, keys), []};
+handle_escape(#dui_state{screen = edit_value} = State) ->
+    {dui_redis_state:set_screen(State, key_detail), []};
+handle_escape(#dui_state{screen = prompt} = State) ->
+    S1 = dui_redis_state:set_prompt(State, undefined),
+    {dui_redis_state:set_screen(S1, key_detail), []};
 handle_escape(#dui_state{screen = connection_form} = State) ->
     cancel_form(State);
 handle_escape(#dui_state{screen = test_connection} = State) ->
@@ -219,6 +280,12 @@ screen_key(#dui_state{screen = confirm_delete} = State, Key, _Mods) ->
     confirm_key(State, Key);
 screen_key(#dui_state{screen = keys} = State, Key, Mods) ->
     keys_screen_key(State, Key, Mods);
+screen_key(#dui_state{screen = key_detail} = State, Key, Mods) ->
+    detail_key(State, Key, Mods);
+screen_key(#dui_state{screen = edit_value} = State, Key, Mods) ->
+    editor_key(State, Key, Mods);
+screen_key(#dui_state{screen = prompt} = State, Key, Mods) ->
+    prompt_key(State, Key, Mods);
 screen_key(#dui_state{screen = switch_db} = State, Key, _Mods) ->
     switch_db_key(State, Key);
 screen_key(State, _Key, _Mods) ->
@@ -370,6 +437,14 @@ do_delete(State) ->
             Id = maps:get(id, Conn, undefined),
             S1 = dui_redis_state:clear_confirm(State),
             {dui_redis_state:set_loading(S1, true), [dui_redis_cmd:delete_connection(State, Id)]};
+        {delete_key, KeyMap} ->
+            Key = maps:get(key, KeyMap),
+            S1 = dui_redis_state:clear_confirm(State),
+            S2 = record_history(S1, Key, <<"delete">>),
+            {dui_redis_state:set_loading(S2, true), [dui_redis_cmd:delete_key(Key)]};
+        flush_db ->
+            S1 = dui_redis_state:clear_confirm(State),
+            {dui_redis_state:set_loading(S1, true), [dui_redis_cmd:flush_db()]};
         _ ->
             {dui_redis_state:clear_confirm(State), []}
     end.
@@ -410,7 +485,7 @@ keys_nav_key(State, Key, _Mods) when Key =:= 'end'; Key =:= <<"G">> ->
     Count = length(dui_redis_state:keys(State)),
     select_key(State, max(0, Count - 1));
 keys_nav_key(State, enter, _Mods) ->
-    key_detail(State);
+    open_detail(State);
 keys_nav_key(State, <<"/">>, _Mods) ->
     start_filter(State);
 keys_nav_key(State, <<"s">>, _Mods) ->
@@ -421,10 +496,17 @@ keys_nav_key(State, <<"l">>, _Mods) ->
     load_more_keys(State);
 keys_nav_key(State, <<"r">>, _Mods) ->
     reload_keys(State);
+keys_nav_key(State, <<"f">>, _Mods) ->
+    confirm_flush_db(State);
 keys_nav_key(State, <<"D">>, _Mods) ->
     start_switch_db(State);
 keys_nav_key(State, _Key, _Mods) ->
     {State, []}.
+
+-spec confirm_flush_db(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+confirm_flush_db(State) ->
+    S1 = dui_redis_state:set_confirm(State, flush_db),
+    {dui_redis_state:set_screen(S1, confirm_delete), []}.
 
 -spec filter_key(#dui_state{}, term()) -> {#dui_state{}, [educkui_command:command()]}.
 filter_key(State, enter) ->
@@ -535,14 +617,17 @@ load_selected_preview(State) ->
             {S1, [dui_redis_cmd:load_preview(State, Key)]}
     end.
 
--spec key_detail(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
-key_detail(State) ->
+-spec open_detail(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+open_detail(State) ->
     case selected_key_map(State) of
         undefined ->
             {State, []};
-        #{key := Key} ->
-            Msg = <<"Key detail arrives in M3: ", Key/binary>>,
-            {dui_redis_state:set_status(State, info, Msg), []}
+        #{key := Key} = KeyMap ->
+            S1 = dui_redis_state:set_current_key(State, KeyMap),
+            S2 = dui_redis_state:set_current_value(S1, undefined),
+            S3 = dui_redis_state:set_detail_scroll(S2, 0),
+            {dui_redis_state:set_screen(S3, key_detail),
+             [dui_redis_cmd:load_detail(State, Key)]}
     end.
 
 -spec selected_key_map(#dui_state{}) -> map() | undefined.
@@ -606,6 +691,352 @@ parse_int(Bin) ->
     try {ok, binary_to_integer(string:trim(Bin))}
     catch error:badarg -> error
     end.
+
+-spec parse_number(binary()) -> {ok, number()} | error.
+parse_number(Bin) ->
+    Trimmed = string:trim(Bin),
+    try {ok, binary_to_float(Trimmed)}
+    catch error:badarg ->
+        try {ok, binary_to_integer(Trimmed)}
+        catch error:badarg -> error
+        end
+    end.
+
+-spec number_or(binary(), number()) -> number().
+number_or(Bin, Default) ->
+    case parse_number(Bin) of
+        {ok, N} -> N;
+        error -> Default
+    end.
+
+%% -- key detail / editing ---------------------------------------------------
+
+-spec find_key_map(#dui_state{}, binary()) -> map().
+find_key_map(State, Key) ->
+    case [K || K <- dui_redis_state:keys(State), maps:get(key, K, undefined) =:= Key] of
+        [K | _] -> K;
+        [] -> #{key => Key, type => string, ttl => -1}
+    end.
+
+-spec current_type(#dui_state{}) -> atom().
+current_type(State) ->
+    case dui_redis_state:current_value(State) of
+        undefined -> string;
+        Value -> maps:get(type, Value, string)
+    end.
+
+-spec refresh_detail(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+refresh_detail(State) ->
+    case dui_redis_state:current_key(State) of
+        undefined -> {State, []};
+        KeyMap ->
+            Key = maps:get(key, KeyMap),
+            {State, [dui_redis_cmd:load_detail(State, Key)]}
+    end.
+
+-spec record_history(#dui_state{}, binary(), binary()) -> #dui_state{}.
+record_history(State, Key, Action) ->
+    case dui_redis_state:current_value(State) of
+        undefined -> State;
+        Value ->
+            Hist = dui_redis_state:history(State),
+            dui_redis_state:set_history(State,
+                dui_redis_history:add(Hist, Key, Value, Action))
+    end.
+
+-spec detail_key(#dui_state{}, term(), [atom()]) ->
+    {#dui_state{}, [educkui_command:command()]}.
+detail_key(State, Key, Mods) ->
+    case Key of
+        K when K =:= <<"j">>; K =:= down -> scroll_detail(State, 1);
+        K when K =:= <<"k">>; K =:= up -> scroll_detail(State, -1);
+        page_down -> scroll_detail(State, 20);
+        page_up -> scroll_detail(State, -20);
+        <<"d">> -> maybe_ctrl_scroll(State, Mods, 20, confirm_delete_key(State));
+        <<"u">> -> maybe_ctrl_scroll(State, Mods, -20, {State, []});
+        <<"r">> -> refresh_detail(State);
+        <<"e">> -> start_edit(State);
+        <<"t">> -> start_prompt(State, ttl);
+        <<"R">> -> start_prompt(State, rename);
+        <<"c">> -> start_prompt(State, copy);
+        <<"a">> -> start_prompt(State, collection_add);
+        <<"x">> -> start_prompt(State, collection_remove);
+        delete -> confirm_delete_key(State);
+        backspace -> confirm_delete_key(State);
+        _ -> {State, []}
+    end.
+
+-spec maybe_ctrl_scroll(#dui_state{}, [atom()], integer(),
+                       {#dui_state{}, [educkui_command:command()]}) ->
+    {#dui_state{}, [educkui_command:command()]}.
+maybe_ctrl_scroll(State, Mods, Delta, Fallback) ->
+    case lists:member(ctrl, Mods) of
+        true -> scroll_detail(State, Delta);
+        false -> Fallback
+    end.
+
+-spec scroll_detail(#dui_state{}, integer()) ->
+    {#dui_state{}, [educkui_command:command()]}.
+scroll_detail(State, Delta) ->
+    Current = dui_redis_state:detail_scroll(State),
+    {dui_redis_state:set_detail_scroll(State, max(0, Current + Delta)), []}.
+
+-spec confirm_delete_key(#dui_state{}) ->
+    {#dui_state{}, [educkui_command:command()]}.
+confirm_delete_key(State) ->
+    case dui_redis_state:current_key(State) of
+        undefined ->
+            {State, []};
+        KeyMap ->
+            S1 = dui_redis_state:set_confirm(State, {delete_key, KeyMap}),
+            {dui_redis_state:set_screen(S1, confirm_delete), []}
+    end.
+
+%% -- value editing ----------------------------------------------------------
+
+-spec start_edit(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_edit(State) ->
+    Value = dui_redis_state:current_value(State),
+    Type = current_type(State),
+    case Type =:= string orelse Type =:= json of
+        false ->
+            {dui_redis_state:set_status(State, info,
+                <<"Use 'a'/'x' to edit collection items">>), []};
+        true ->
+            Text = case Value of
+                undefined -> <<>>;
+                _ -> maps:get(text, Value, <<>>)
+            end,
+            Editor = dui_redis_editor:new(Text),
+            S1 = dui_redis_state:set_editor(State, Editor),
+            {dui_redis_state:set_screen(S1, edit_value), []}
+    end.
+
+-spec editor_key(#dui_state{}, term(), [atom()]) ->
+    {#dui_state{}, [educkui_command:command()]}.
+editor_key(State, <<"s">>, Mods) ->
+    case lists:member(ctrl, Mods) of
+        true -> save_editor(State);
+        false -> editor_edit(State, <<"s">>)
+    end;
+editor_key(State, f2, _Mods) ->
+    %% Ctrl+S is sometimes swallowed by terminal flow control; F2 is a fallback.
+    save_editor(State);
+editor_key(State, Key, _Mods) ->
+    editor_edit(State, Key).
+
+-spec editor_edit(#dui_state{}, term()) -> {#dui_state{}, [educkui_command:command()]}.
+editor_edit(State, Key) ->
+    Editor = dui_redis_state:editor(State),
+    Editor1 = case Key of
+        enter -> dui_redis_editor:newline(Editor);
+        backspace -> dui_redis_editor:backspace(Editor);
+        delete -> dui_redis_editor:delete(Editor);
+        left -> dui_redis_editor:move(left, Editor);
+        right -> dui_redis_editor:move(right, Editor);
+        up -> dui_redis_editor:move(up, Editor);
+        down -> dui_redis_editor:move(down, Editor);
+        home -> dui_redis_editor:home(Editor);
+        'end' -> dui_redis_editor:'end'(Editor);
+        tab -> dui_redis_editor:insert(<<"  ">>, Editor);
+        K when is_binary(K) -> dui_redis_editor:insert(K, Editor);
+        _ -> Editor
+    end,
+    {dui_redis_state:set_editor(State, Editor1), []}.
+
+-spec save_editor(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+save_editor(State) ->
+    Editor = dui_redis_state:editor(State),
+    Text = dui_redis_editor:value(Editor),
+    KeyMap = dui_redis_state:current_key(State),
+    Key = maps:get(key, KeyMap, <<>>),
+    Type = current_type(State),
+    Fun = case Type of
+        json -> fun() -> dui_redis_client:json_set(Key, Text) end;
+        _ -> fun() -> dui_redis_client:set_string(Key, Text, 0) end
+    end,
+    S1 = record_history(State, Key, <<"set">>),
+    {S1, [dui_redis_cmd:write(value_saved, Fun)]}.
+
+%% -- generic prompt ---------------------------------------------------------
+
+-spec start_prompt(#dui_state{}, atom()) ->
+    {#dui_state{}, [educkui_command:command()]}.
+start_prompt(State, rename) ->
+    KeyMap = dui_redis_state:current_key(State),
+    Key = maps:get(key, KeyMap, <<>>),
+    Prompt = dui_redis_prompt:new([{name, <<"New key name">>, false}], #{name => Key}),
+    open_prompt(State, Prompt, {rename, KeyMap});
+start_prompt(State, copy) ->
+    KeyMap = dui_redis_state:current_key(State),
+    Key = maps:get(key, KeyMap, <<>>),
+    Prompt = dui_redis_prompt:new([{name, <<"Destination key">>, false}],
+                                  #{name => <<Key/binary, ":copy">>}),
+    open_prompt(State, Prompt, {copy, KeyMap});
+start_prompt(State, ttl) ->
+    KeyMap = dui_redis_state:current_key(State),
+    Prompt = dui_redis_prompt:new([{ttl, <<"TTL seconds (-1 to remove)">>, false}],
+                                  #{ttl => <<>>}),
+    open_prompt(State, Prompt, {ttl, KeyMap});
+start_prompt(State, Action) when Action =:= collection_add;
+                                 Action =:= collection_remove ->
+    KeyMap = dui_redis_state:current_key(State),
+    Type = current_type(State),
+    Kind = case Action of
+        collection_add -> add;
+        collection_remove -> remove
+    end,
+    Fields = collection_fields(Type, Kind),
+    Prompt = dui_redis_prompt:new(Fields),
+    open_prompt(State, Prompt, {Action, KeyMap, Type}).
+
+-spec open_prompt(#dui_state{}, dui_redis_prompt:prompt(), term()) ->
+    {#dui_state{}, [educkui_command:command()]}.
+open_prompt(State, Prompt, Purpose) ->
+    S1 = dui_redis_state:set_prompt(State, Prompt),
+    S2 = dui_redis_state:set_prompt_purpose(S1, Purpose),
+    {dui_redis_state:set_screen(S2, prompt), []}.
+
+-spec prompt_key(#dui_state{}, term(), [atom()]) ->
+    {#dui_state{}, [educkui_command:command()]}.
+prompt_key(State, tab, Mods) ->
+    Prompt = dui_redis_state:prompt(State),
+    Prompt1 = case lists:member(shift, Mods) of
+        true -> dui_redis_prompt:focus_prev(Prompt);
+        false -> dui_redis_prompt:focus_next(Prompt)
+    end,
+    {dui_redis_state:set_prompt(State, Prompt1), []};
+prompt_key(State, down, _Mods) ->
+    prompt_focus(State, next);
+prompt_key(State, up, _Mods) ->
+    prompt_focus(State, prev);
+prompt_key(State, enter, _Mods) ->
+    submit_prompt(State);
+prompt_key(State, Key, Mods) ->
+    prompt_edit(State, Key, Mods).
+
+-spec prompt_focus(#dui_state{}, next | prev) ->
+    {#dui_state{}, [educkui_command:command()]}.
+prompt_focus(State, Dir) ->
+    Prompt = dui_redis_state:prompt(State),
+    Prompt1 = case Dir of
+        next -> dui_redis_prompt:focus_next(Prompt);
+        prev -> dui_redis_prompt:focus_prev(Prompt)
+    end,
+    {dui_redis_state:set_prompt(State, Prompt1), []}.
+
+-spec prompt_edit(#dui_state{}, term(), [atom()]) ->
+    {#dui_state{}, [educkui_command:command()]}.
+prompt_edit(State, Key, Mods) ->
+    Prompt = dui_redis_state:prompt(State),
+    Prompt1 = case Key of
+        backspace -> dui_redis_prompt:backspace(Prompt);
+        delete -> dui_redis_prompt:delete(Prompt);
+        left -> dui_redis_prompt:move(left, Prompt);
+        right -> dui_redis_prompt:move(right, Prompt);
+        home -> dui_redis_prompt:home(Prompt);
+        'end' -> dui_redis_prompt:'end'(Prompt);
+        <<" ">> -> dui_redis_prompt:insert(<<" ">>, Prompt);
+        K when is_binary(K), Mods =:= [] -> dui_redis_prompt:insert(K, Prompt);
+        K when is_binary(K) ->
+            case has_ctrl_like(Mods) of
+                true -> Prompt;
+                false -> dui_redis_prompt:insert(K, Prompt)
+            end;
+        _ -> Prompt
+    end,
+    {dui_redis_state:set_prompt(State, Prompt1), []}.
+
+-spec submit_prompt(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+submit_prompt(State) ->
+    Purpose = dui_redis_state:prompt_purpose(State),
+    Prompt = dui_redis_state:prompt(State),
+    Values = dui_redis_prompt:to_map(Prompt),
+    {Tag, Fun} = prompt_command(Purpose, Values),
+    S1 = dui_redis_state:set_prompt(State, undefined),
+    S2 = dui_redis_state:set_screen(S1, key_detail),
+    {S2, [dui_redis_cmd:write(Tag, Fun)]}.
+
+-spec prompt_command(term(), map()) -> {atom(), fun(() -> term())}.
+prompt_command({rename, KeyMap}, Values) ->
+    Old = maps:get(key, KeyMap),
+    New = maps:get(name, Values, <<>>),
+    {key_renamed, fun() -> dui_redis_client:rename_key(Old, New) end};
+prompt_command({copy, KeyMap}, Values) ->
+    Src = maps:get(key, KeyMap),
+    Dst = maps:get(name, Values, <<>>),
+    {key_copied, fun() -> dui_redis_client:copy_key(Src, Dst, false) end};
+prompt_command({ttl, KeyMap}, Values) ->
+    Key = maps:get(key, KeyMap),
+    Seconds = case parse_int(maps:get(ttl, Values, <<>>)) of
+        {ok, N} -> N;
+        error -> 0
+    end,
+    {ttl_set, fun() -> dui_redis_client:set_ttl(Key, Seconds) end};
+prompt_command({collection_add, KeyMap, Type}, Values) ->
+    Key = maps:get(key, KeyMap),
+    {collection_added, collection_fun(Type, add, Key, Values)};
+prompt_command({collection_remove, KeyMap, Type}, Values) ->
+    Key = maps:get(key, KeyMap),
+    {collection_removed, collection_fun(Type, remove, Key, Values)}.
+
+-spec collection_fun(atom(), add | remove, binary(), map()) -> fun(() -> term()).
+collection_fun(list, add, Key, V) ->
+    fun() -> dui_redis_client:list_push(Key, maps:get(value, V)) end;
+collection_fun(list, remove, Key, V) ->
+    fun() -> dui_redis_client:list_remove(Key, maps:get(value, V)) end;
+collection_fun(set, add, Key, V) ->
+    fun() -> dui_redis_client:set_add(Key, maps:get(member, V)) end;
+collection_fun(set, remove, Key, V) ->
+    fun() -> dui_redis_client:set_remove(Key, maps:get(member, V)) end;
+collection_fun(zset, add, Key, V) ->
+    Score = number_or(maps:get(score, V, <<"0">>), 0),
+    fun() -> dui_redis_client:zset_add(Key, Score, maps:get(member, V)) end;
+collection_fun(zset, remove, Key, V) ->
+    fun() -> dui_redis_client:zset_remove(Key, maps:get(member, V)) end;
+collection_fun(hash, add, Key, V) ->
+    fun() -> dui_redis_client:hash_set(Key, maps:get(field, V), maps:get(value, V)) end;
+collection_fun(hash, remove, Key, V) ->
+    fun() -> dui_redis_client:hash_delete(Key, maps:get(field, V)) end;
+collection_fun(stream, add, Key, V) ->
+    fun() -> dui_redis_client:stream_add(Key, [{maps:get(field, V), maps:get(value, V)}]) end;
+collection_fun(stream, remove, Key, V) ->
+    fun() -> dui_redis_client:stream_delete(Key, maps:get(id, V)) end;
+collection_fun(geo, add, Key, V) ->
+    fun() ->
+        dui_redis_client:q([<<"GEOADD">>, Key, maps:get(lon, V),
+                            maps:get(lat, V), maps:get(member, V)])
+    end;
+collection_fun(geo, remove, Key, V) ->
+    fun() -> dui_redis_client:zset_remove(Key, maps:get(member, V)) end;
+collection_fun(hll, add, Key, V) ->
+    fun() -> dui_redis_client:q([<<"PFADD">>, Key, maps:get(element, V)]) end;
+collection_fun(bitmap, add, Key, V) ->
+    fun() ->
+        dui_redis_client:q([<<"SETBIT">>, Key, maps:get(offset, V), maps:get(value, V)])
+    end;
+collection_fun(_Type, _Action, _Key, _V) ->
+    fun() -> {error, unsupported} end.
+
+-spec collection_fields(atom(), add | remove) -> [dui_redis_prompt:field()].
+collection_fields(list, _) -> [{value, <<"Value">>, false}];
+collection_fields(set, _) -> [{member, <<"Member">>, false}];
+collection_fields(zset, add) ->
+    [{member, <<"Member">>, false}, {score, <<"Score">>, false}];
+collection_fields(zset, remove) -> [{member, <<"Member">>, false}];
+collection_fields(hash, _) ->
+    [{field, <<"Field">>, false}, {value, <<"Value">>, false}];
+collection_fields(stream, add) ->
+    [{field, <<"Field">>, false}, {value, <<"Value">>, false}];
+collection_fields(stream, remove) -> [{id, <<"Entry ID">>, false}];
+collection_fields(geo, add) ->
+    [{member, <<"Member">>, false}, {lon, <<"Longitude">>, false},
+     {lat, <<"Latitude">>, false}];
+collection_fields(geo, remove) -> [{member, <<"Member">>, false}];
+collection_fields(hll, _) -> [{element, <<"Element">>, false}];
+collection_fields(bitmap, _) ->
+    [{offset, <<"Bit offset">>, false}, {value, <<"Bit (0/1)">>, false}];
+collection_fields(_Type, _Action) -> [{value, <<"Value">>, false}].
 
 %% ---------------------------------------------------------------------------
 %% State transitions
@@ -781,6 +1212,12 @@ screen_view(#dui_state{screen = confirm_delete} = State) ->
     ]);
 screen_view(#dui_state{screen = keys} = State) ->
     keys_view(State);
+screen_view(#dui_state{screen = key_detail} = State) ->
+    detail_view(State);
+screen_view(#dui_state{screen = edit_value} = State) ->
+    editor_view(State);
+screen_view(#dui_state{screen = prompt} = State) ->
+    prompt_view(State);
 screen_view(#dui_state{screen = switch_db} = State) ->
     switch_db_view(State);
 screen_view(_State) ->
@@ -940,17 +1377,138 @@ test_view(State) ->
         footer(<<" esc/enter back">>)
     ]).
 
+%% -- key detail / editor / prompt -------------------------------------------
+
+-spec detail_view(#dui_state{}) -> #dui_node{}.
+detail_view(State) ->
+    KeyMap = case dui_redis_state:current_key(State) of
+        undefined -> #{};
+        K -> K
+    end,
+    Name = to_bin(maps:get(key, KeyMap, <<>>)),
+    Type = current_type(State),
+    Ttl = dui_redis_fmt:ttl_render(maps:get(ttl, KeyMap, -1)),
+    Meta = <<"  type: ", (dui_redis_preview:type_label(Type))/binary,
+             "   ttl: ", Ttl/binary>>,
+    ValueLines = case dui_redis_state:current_value(State) of
+        undefined -> [<<"loading...">>];
+        Value -> dui_redis_preview:lines(Value, 5000)
+    end,
+    {Rows, _} = dui_redis_state:size(State),
+    Visible = max(1, Rows - 8),
+    Scroll = min(dui_redis_state:detail_scroll(State),
+                 max(0, length(ValueLines) - 1)),
+    Window = lists:sublist(ValueLines, Scroll + 1, Visible),
+    LineNodes = [educkui_render_node:text(<<"  ", L/binary>>) || L <- Window],
+    educkui_render_node:stack(vertical, [
+        educkui_render_node:text(<<" ", Name/binary>>, dui_redis_theme:title()),
+        educkui_render_node:text(Meta, dui_redis_theme:subtitle()),
+        educkui_render_node:text(<<>>)
+        | LineNodes] ++
+        [footer(<<" e edit   a add   x remove   t ttl   R rename   c copy   d delete   r refresh   esc back">>)
+    ]).
+
+-spec editor_view(#dui_state{}) -> #dui_node{}.
+editor_view(State) ->
+    Editor = dui_redis_state:editor(State),
+    Lines = dui_redis_editor:lines(Editor),
+    Row = dui_redis_editor:row(Editor),
+    Col = dui_redis_editor:col(Editor),
+    {Rows, _} = dui_redis_state:size(State),
+    Visible = max(1, Rows - 6),
+    Offset = max(0, Row - Visible + 1),
+    Window = lists:sublist(Lines, Offset + 1, Visible),
+    LineNodes = [editor_line_node(L, Offset + I, Row, Col)
+                 || {L, I} <- lists:zip(Window, lists:seq(0, length(Window) - 1))],
+    educkui_render_node:stack(vertical, [
+        educkui_render_node:text(<<" Edit value   Ctrl+S/F2 save   Esc cancel">>, dui_redis_theme:subtitle()),
+        educkui_render_node:text(<<>>)
+        | LineNodes ++ [footer(<<" arrows move   enter newline   Ctrl+S/F2 save   Esc cancel">>)]
+    ]).
+
+-spec editor_line_node(binary(), non_neg_integer(), non_neg_integer(), non_neg_integer()) ->
+    #dui_node{}.
+editor_line_node(Line, Index, CursorRow, CursorCol) ->
+    case Index =:= CursorRow of
+        true ->
+            educkui_render_node:widget(educkui_widget_text_view, #{
+                lines => [[{<<"  ">>, undefined} | cursor_spans(Line, CursorCol)]]
+            });
+        false ->
+            educkui_render_node:text(<<"  ", Line/binary>>)
+    end.
+
+-spec cursor_spans(binary(), non_neg_integer()) -> [{binary(), term()}].
+cursor_spans(Line, Col) ->
+    Before = string:slice(Line, 0, Col),
+    At = string:slice(Line, Col, 1),
+    After = string:slice(Line, Col + 1),
+    AtChar = case At of
+        <<>> -> <<" ">>;
+        _ -> At
+    end,
+    [{Before, undefined},
+     {AtChar, educkui_style:from([{reverse, true}])},
+     {After, undefined}].
+
+-spec prompt_view(#dui_state{}) -> #dui_node{}.
+prompt_view(State) ->
+    Prompt = dui_redis_state:prompt(State),
+    Fields = dui_redis_prompt:fields(Prompt),
+    Focus = dui_redis_prompt:focus(Prompt),
+    FieldNodes = lists:flatmap(
+        fun({Field, Index}) -> prompt_field_nodes(Field, Index, Focus, Prompt) end,
+        lists:zip(Fields, lists:seq(0, length(Fields) - 1))),
+    educkui_render_node:stack(vertical, [
+        educkui_render_node:text(<<>>),
+        educkui_render_node:text(<<"  Tab next field   Enter submit   Esc cancel">>,
+                                 dui_redis_theme:subtitle()),
+        educkui_render_node:text(<<>>)
+        | FieldNodes
+    ]).
+
+-spec prompt_field_nodes(dui_redis_prompt:field(), non_neg_integer(),
+                         non_neg_integer(), dui_redis_prompt:prompt()) -> [#dui_node{}].
+prompt_field_nodes({Id, Label, Masked}, Index, Focus, Prompt) ->
+    Value = dui_redis_prompt:value(Prompt, Id),
+    Display = case Masked of
+        true -> binary:copy(<<"*">>, string:length(Value));
+        false -> Value
+    end,
+    Prefix = case Index =:= Focus of
+        true -> <<"> ">>;
+        false -> <<"  ">>
+    end,
+    Style = case Index =:= Focus of
+        true -> dui_redis_theme:info();
+        false -> dui_redis_theme:subtitle()
+    end,
+    ValueStyle = case Index =:= Focus of
+        true -> dui_redis_theme:info();
+        false -> undefined
+    end,
+    [educkui_render_node:text(<<Prefix/binary, Label/binary, ":">>, Style),
+     educkui_render_node:height(
+        educkui_render_node:text(<<"    ", Display/binary>>, ValueStyle), 1)].
+
 %% -- confirm delete ---------------------------------------------------------
 
 -spec confirm_view(#dui_state{}) -> #dui_node{}.
 confirm_view(State) ->
-    Name = case dui_redis_state:confirm(State) of
-        {delete_connection, Conn} -> to_bin(maps:get(name, Conn, <<>>));
-        _ -> <<>>
+    {Title, Content} = case dui_redis_state:confirm(State) of
+        {delete_connection, Conn} ->
+            Name = to_bin(maps:get(name, Conn, <<>>)),
+            {<<"Confirm Delete">>, <<"Delete connection \"", Name/binary, "\"?  (y/n)">>};
+        {delete_key, KeyMap} ->
+            Key = to_bin(maps:get(key, KeyMap, <<>>)),
+            {<<"Confirm Delete">>, <<"Delete key \"", Key/binary, "\"?  (y/n)">>};
+        flush_db ->
+            {<<"Confirm Flush">>, <<"Flush the current database?  (y/n)">>};
+        _ ->
+            {<<"Confirm">>, <<"(y/n)">>}
     end,
-    Content = <<"Delete connection \"", Name/binary, "\"?  (y/n)">>,
     educkui_render_node:widget(educkui_widget_dialog, #{
-        title => <<"Confirm Delete">>,
+        title => Title,
         content => Content,
         buttons => [],
         width => 50,

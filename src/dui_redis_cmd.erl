@@ -18,6 +18,10 @@
     test_connection/1,
     load_keys/4,
     load_preview/2,
+    load_detail/2,
+    write/2,
+    delete_key/1,
+    flush_db/0,
     switch_db/2,
     debounce_filter/3
 ]).
@@ -96,6 +100,32 @@ load_keys(_State, Pattern, Cursor, Count) ->
 load_preview(_State, Key) ->
     educkui_command:exec(fun() ->
         {preview_loaded, Key, safe(fun() -> dui_redis_client:value_preview(Key) end)}
+    end).
+
+%% @doc Loads the larger detail value for `Key'.
+-spec load_detail(#dui_state{}, binary()) -> educkui_command:command().
+load_detail(_State, Key) ->
+    educkui_command:exec(fun() ->
+        {detail_loaded, Key, safe(fun() -> dui_redis_client:value_detail(Key) end)}
+    end).
+
+%% @doc Runs a side-effecting write fun, tagging the result with `Tag'.
+-spec write(atom(), fun(() -> term())) -> educkui_command:command().
+write(Tag, Fun) when is_function(Fun, 0) ->
+    educkui_command:exec(fun() -> {Tag, safe(Fun)} end).
+
+%% @doc Deletes `Key', echoing the key back for state updates.
+-spec delete_key(binary()) -> educkui_command:command().
+delete_key(Key) ->
+    educkui_command:exec(fun() ->
+        {key_deleted, Key, safe(fun() -> dui_redis_client:delete_key(Key) end)}
+    end).
+
+%% @doc Flushes the current database.
+-spec flush_db() -> educkui_command:command().
+flush_db() ->
+    educkui_command:exec(fun() ->
+        {db_flushed, safe(fun() -> dui_redis_client:flush_db() end)}
     end).
 
 %% @doc Switches the active database.

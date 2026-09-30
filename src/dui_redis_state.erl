@@ -58,6 +58,20 @@
     set_loading_keys/2,
     db_input/1,
     set_db_input/2,
+    current_key/1,
+    set_current_key/2,
+    current_value/1,
+    set_current_value/2,
+    detail_scroll/1,
+    set_detail_scroll/2,
+    editor/1,
+    set_editor/2,
+    prompt/1,
+    set_prompt/2,
+    prompt_purpose/1,
+    set_prompt_purpose/2,
+    history/1,
+    set_history/2,
     status/1,
     show_help/1,
     config_path/1,
@@ -81,6 +95,7 @@ new(Runtime, CliOpts) ->
         runtime = Runtime,
         cli = CliOpts,
         config_path = to_path(maps:get(config_path, CliOpts, undefined)),
+        history = dui_redis_history:new(),
         loading = true
     }.
 
@@ -275,6 +290,48 @@ db_input(#dui_state{db_input = E}) -> E.
 
 -spec set_db_input(#dui_state{}, term()) -> #dui_state{}.
 set_db_input(State, Edit) -> State#dui_state{db_input = Edit}.
+
+-spec current_key(#dui_state{}) -> map() | undefined.
+current_key(#dui_state{current_key = K}) -> K.
+
+-spec set_current_key(#dui_state{}, map() | undefined) -> #dui_state{}.
+set_current_key(State, Key) -> State#dui_state{current_key = Key}.
+
+-spec current_value(#dui_state{}) -> map() | undefined.
+current_value(#dui_state{current_value = V}) -> V.
+
+-spec set_current_value(#dui_state{}, map() | undefined) -> #dui_state{}.
+set_current_value(State, Value) -> State#dui_state{current_value = Value}.
+
+-spec detail_scroll(#dui_state{}) -> non_neg_integer().
+detail_scroll(#dui_state{detail_scroll = N}) -> N.
+
+-spec set_detail_scroll(#dui_state{}, non_neg_integer()) -> #dui_state{}.
+set_detail_scroll(State, N) -> State#dui_state{detail_scroll = max(0, N)}.
+
+-spec editor(#dui_state{}) -> term() | undefined.
+editor(#dui_state{editor = E}) -> E.
+
+-spec set_editor(#dui_state{}, term()) -> #dui_state{}.
+set_editor(State, Editor) -> State#dui_state{editor = Editor}.
+
+-spec prompt(#dui_state{}) -> term() | undefined.
+prompt(#dui_state{prompt = P}) -> P.
+
+-spec set_prompt(#dui_state{}, term()) -> #dui_state{}.
+set_prompt(State, Prompt) -> State#dui_state{prompt = Prompt}.
+
+-spec prompt_purpose(#dui_state{}) -> term() | undefined.
+prompt_purpose(#dui_state{prompt_purpose = P}) -> P.
+
+-spec set_prompt_purpose(#dui_state{}, term()) -> #dui_state{}.
+set_prompt_purpose(State, Purpose) -> State#dui_state{prompt_purpose = Purpose}.
+
+-spec history(#dui_state{}) -> dui_redis_history:history() | undefined.
+history(#dui_state{history = H}) -> H.
+
+-spec set_history(#dui_state{}, dui_redis_history:history()) -> #dui_state{}.
+set_history(State, Hist) -> State#dui_state{history = Hist}.
 
 -spec status(#dui_state{}) -> {info | error, binary()} | undefined.
 status(#dui_state{status = Status}) -> Status.
