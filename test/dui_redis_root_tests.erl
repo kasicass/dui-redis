@@ -100,8 +100,7 @@ live_connect_flow_test_() ->
     end.
 
 live_connect_flow() ->
-    stop_client(),
-    {ok, _} = application:ensure_all_started(dui_redis),
+    reset_app(),
     seed_keys(),
     Dir = mk_tmp(),
     Path = filename:join(Dir, "config.json"),
@@ -126,8 +125,7 @@ live_keys_browse_test_() ->
     end.
 
 live_keys_browse() ->
-    stop_client(),
-    {ok, _} = application:ensure_all_started(dui_redis),
+    reset_app(),
     seed_keys(),
     Dir = mk_tmp(),
     Path = filename:join(Dir, "config.json"),
@@ -165,8 +163,7 @@ live_key_detail_test_() ->
     end.
 
 live_key_detail() ->
-    stop_client(),
-    {ok, _} = application:ensure_all_started(dui_redis),
+    reset_app(),
     seed_keys(),
     Dir = mk_tmp(),
     Path = filename:join(Dir, "config.json"),
@@ -219,8 +216,7 @@ live_favorites_and_tree_test_() ->
     end.
 
 live_favorites_and_tree() ->
-    stop_client(),
-    {ok, _} = application:ensure_all_started(dui_redis),
+    reset_app(),
     seed_keys(),
     Dir = mk_tmp(),
     Path = filename:join(Dir, "config.json"),
@@ -262,6 +258,49 @@ live_favorites_and_tree() ->
     _ = application:stop(dui_redis),
     ok.
 
+live_monitoring_screens_test_() ->
+    case redis_available() of
+        true -> {timeout, 40, fun live_monitoring_screens/0};
+        false -> []
+    end.
+
+live_monitoring_screens() ->
+    reset_app(),
+    seed_keys(),
+    set_expiring_key(),
+    Dir = mk_tmp(),
+    Path = filename:join(Dir, "config.json"),
+    save_conn(Path, <<"Local">>, <<"localhost">>, 6379),
+    Pid = educkui_test:start(#{root => dui_redis_root, size => {24, 100},
+                               init_args => [{opts, #{config_path => Path}}]}),
+    ok = educkui_test:send_event(Pid, educkui_event:resize(100, 24)),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 300)),
+    ok = educkui_test:send_key(Pid, enter),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.connected end, 300)),
+    %% server info
+    ok = educkui_test:send_key(Pid, <<"i">>),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.screen =:= server_info end, 150)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Server Info">>)),
+    ok = educkui_test:send_key(Pid, esc),
+    %% live metrics
+    ok = educkui_test:send_key(Pid, <<"m">>),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.screen =:= live_metrics
+                  andalso S#dui_state.metrics =/= [] end, 150)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Live Metrics">>)),
+    ok = educkui_test:send_key(Pid, esc),
+    %% expiring keys
+    ok = educkui_test:send_event(Pid, educkui_event:key(<<"x">>, [{modifiers, [ctrl]}])),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.screen =:= expiring_keys end, 200)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Expiring Keys">>)),
+    cleanup(Pid, Dir),
+    _ = application:stop(dui_redis),
+    ok.
+
 start_root() ->
     Dir = mk_tmp(),
     Path = filename:join(Dir, "config.json"),
@@ -285,9 +324,21 @@ seed_keys() ->
     eredis:stop(C),
     ok.
 
+set_expiring_key() ->
+    {ok, C} = eredis:start_link([{host, "localhost"}, {port, 6379}, {database, 0}]),
+    _ = eredis:q(C, [<<"SET">>, <<"m5:expiring">>, <<"v">>, <<"EX">>, <<"60">>]),
+    eredis:stop(C),
+    ok.
+
 cleanup(Pid, Dir) ->
     ok = educkui_test:stop(Pid),
     _ = file:del_dir_r(Dir),
+    ok.
+
+reset_app() ->
+    _ = application:stop(dui_redis),
+    stop_client(),
+    {ok, _} = application:ensure_all_started(dui_redis),
     ok.
 
 stop_client() ->

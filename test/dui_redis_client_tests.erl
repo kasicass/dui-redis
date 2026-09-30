@@ -149,6 +149,34 @@ live_search() ->
     ?assert(is_binary(Diff)),
     ok = dui_redis_client:disconnect().
 
+live_monitoring_test_() ->
+    case redis_available() of
+        true -> {timeout, 40, fun live_monitoring/0};
+        false -> []
+    end.
+
+live_monitoring() ->
+    ensure_client(),
+    ok = dui_redis_client:connect(#{host => <<"localhost">>, port => 6379, db => 0}),
+    {ok, _} = dui_redis_client:q([<<"FLUSHDB">>]),
+    {ok, _} = dui_redis_client:set_string(<<"m5:short">>, <<"v">>, 60),
+    {ok, _} = dui_redis_client:set_string(<<"m5:long">>, <<"v">>, 100000),
+    {ok, Info} = dui_redis_client:server_info(),
+    ?assert(is_binary(maps:get(version, Info, <<>>))),
+    ?assertEqual(<<"2">>, maps:get(total_keys, Info, <<>>)),
+    {ok, Mem} = dui_redis_client:memory_stats(),
+    ?assert(maps:is_key(used, Mem)),
+    {ok, Metrics} = dui_redis_client:live_metrics(),
+    ?assert(is_integer(maps:get(ops, Metrics, -1))),
+    {ok, Clients} = dui_redis_client:client_list(),
+    ?assert(length(Clients) >= 1),
+    {ok, _Slow} = dui_redis_client:slow_log(10),
+    {ok, Expiring} = dui_redis_client:expiring_keys(300),
+    Keys = [maps:get(key, K) || K <- Expiring],
+    ?assert(lists:member(<<"m5:short">>, Keys)),
+    ?assertNot(lists:member(<<"m5:long">>, Keys)),
+    ok = dui_redis_client:disconnect().
+
 %% ---------------------------------------------------------------------------
 
 ensure_client() ->

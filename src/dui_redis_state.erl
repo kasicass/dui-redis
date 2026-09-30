@@ -86,6 +86,23 @@
     set_selected_tree/2,
     result_text/1,
     set_result_text/2,
+    server_info/1,
+    set_server_info/2,
+    slow_log/1,
+    set_slow_log/2,
+    clients/1,
+    set_clients/2,
+    memory_stats/1,
+    set_memory_stats/2,
+    metrics/1,
+    push_metric/2,
+    clear_metrics/1,
+    metrics_active/1,
+    set_metrics_active/2,
+    expiring/1,
+    set_expiring/2,
+    row_selected/1,
+    set_row_selected/2,
     status/1,
     show_help/1,
     config_path/1,
@@ -395,6 +412,59 @@ result_text(#dui_state{result_text = T}) -> T.
 
 -spec set_result_text(#dui_state{}, binary() | undefined) -> #dui_state{}.
 set_result_text(State, Text) -> State#dui_state{result_text = Text}.
+
+-spec server_info(#dui_state{}) -> map() | undefined.
+server_info(#dui_state{server_info = I}) -> I.
+
+-spec set_server_info(#dui_state{}, map()) -> #dui_state{}.
+set_server_info(State, Info) -> State#dui_state{server_info = Info, loading = false}.
+
+-spec slow_log(#dui_state{}) -> [map()].
+slow_log(#dui_state{slow_log = L}) -> L.
+
+-spec set_slow_log(#dui_state{}, [map()]) -> #dui_state{}.
+set_slow_log(State, L) -> State#dui_state{slow_log = L, row_selected = 0, loading = false}.
+
+-spec clients(#dui_state{}) -> [map()].
+clients(#dui_state{clients = C}) -> C.
+
+-spec set_clients(#dui_state{}, [map()]) -> #dui_state{}.
+set_clients(State, C) -> State#dui_state{clients = C, row_selected = 0, loading = false}.
+
+-spec memory_stats(#dui_state{}) -> map() | undefined.
+memory_stats(#dui_state{memory_stats = M}) -> M.
+
+-spec set_memory_stats(#dui_state{}, map()) -> #dui_state{}.
+set_memory_stats(State, M) -> State#dui_state{memory_stats = M, loading = false}.
+
+-spec metrics(#dui_state{}) -> [map()].
+metrics(#dui_state{metrics = M}) -> M.
+
+%% @doc Appends a metric sample, keeping the most recent 60.
+-spec push_metric(#dui_state{}, map()) -> #dui_state{}.
+push_metric(#dui_state{metrics = Metrics} = State, Metric) ->
+    State#dui_state{metrics = lists:sublist([Metric | Metrics], 60)}.
+
+-spec clear_metrics(#dui_state{}) -> #dui_state{}.
+clear_metrics(State) -> State#dui_state{metrics = []}.
+
+-spec metrics_active(#dui_state{}) -> boolean().
+metrics_active(#dui_state{metrics_active = B}) -> B.
+
+-spec set_metrics_active(#dui_state{}, boolean()) -> #dui_state{}.
+set_metrics_active(State, B) -> State#dui_state{metrics_active = B}.
+
+-spec expiring(#dui_state{}) -> [map()].
+expiring(#dui_state{expiring = E}) -> E.
+
+-spec set_expiring(#dui_state{}, [map()]) -> #dui_state{}.
+set_expiring(State, E) -> State#dui_state{expiring = E, row_selected = 0, loading = false}.
+
+-spec row_selected(#dui_state{}) -> non_neg_integer().
+row_selected(#dui_state{row_selected = N}) -> N.
+
+-spec set_row_selected(#dui_state{}, non_neg_integer()) -> #dui_state{}.
+set_row_selected(State, N) -> State#dui_state{row_selected = max(0, N)}.
 
 -spec status(#dui_state{}) -> {info | error, binary()} | undefined.
 status(#dui_state{status = Status}) -> Status.

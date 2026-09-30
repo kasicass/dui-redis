@@ -52,7 +52,8 @@ event_to_msg(_Event, _State) ->
 
 -spec update(term(), #dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
 update(tick, State) ->
-    {dui_redis_state:incr_tick(State), []};
+    S1 = dui_redis_state:incr_tick(State),
+    {S1, tick_commands(S1)};
 update({resize, W, H}, State) ->
     {dui_redis_state:set_size(State, H, W), []};
 update({config_loaded, {ok, Config}}, State) ->
@@ -231,6 +232,41 @@ update({json_result, {ok, Value}}, State) ->
     {dui_redis_state:set_screen(S1, result_text), []};
 update({json_result, {error, Reason}}, State) ->
     {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({server_info_loaded, {ok, Info}}, State) ->
+    S1 = dui_redis_state:set_server_info(State, Info),
+    {dui_redis_state:set_screen(S1, server_info), []};
+update({server_info_loaded, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({slow_log_loaded, {ok, Entries}}, State) ->
+    S1 = dui_redis_state:set_slow_log(State, Entries),
+    {dui_redis_state:set_screen(S1, slow_log), []};
+update({slow_log_loaded, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({clients_loaded, {ok, Clients}}, State) ->
+    S1 = dui_redis_state:set_clients(State, Clients),
+    {dui_redis_state:set_screen(S1, client_list), []};
+update({clients_loaded, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({memory_stats_loaded, {ok, Stats}}, State) ->
+    S1 = dui_redis_state:set_memory_stats(State, Stats),
+    {dui_redis_state:set_screen(S1, memory_stats), []};
+update({memory_stats_loaded, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({live_metrics_loaded, {ok, Metric}}, State) ->
+    case dui_redis_state:metrics_active(State) of
+        true ->
+            S1 = dui_redis_state:push_metric(State, Metric),
+            {dui_redis_state:set_screen(S1, live_metrics), []};
+        false ->
+            {State, []}
+    end;
+update({live_metrics_loaded, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({expiring_loaded, {ok, Keys}}, State) ->
+    S1 = dui_redis_state:set_expiring(State, Keys),
+    {dui_redis_state:set_screen(S1, expiring_keys), []};
+update({expiring_loaded, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
 update({key, Key, Mods}, State) ->
     handle_event(Key, Mods, State);
 update(_Msg, State) ->
@@ -320,6 +356,13 @@ handle_escape(#dui_state{screen = keys} = State) ->
     {dui_redis_state:set_loading(State, true), [dui_redis_cmd:disconnect()]};
 handle_escape(#dui_state{screen = switch_db} = State) ->
     {dui_redis_state:set_screen(State, keys), []};
+handle_escape(#dui_state{screen = live_metrics} = State) ->
+    S1 = dui_redis_state:set_metrics_active(State, false),
+    {dui_redis_state:set_screen(S1, keys), []};
+handle_escape(#dui_state{screen = S} = State)
+        when S =:= server_info; S =:= slow_log; S =:= client_list;
+             S =:= memory_stats; S =:= expiring_keys; S =:= logs ->
+    {dui_redis_state:set_screen(State, keys), []};
 handle_escape(State) ->
     {dui_redis_state:clear_status(State), []}.
 
@@ -349,6 +392,11 @@ screen_key(#dui_state{screen = result_text} = State, _Key, _Mods) ->
     {State, []};
 screen_key(#dui_state{screen = switch_db} = State, Key, _Mods) ->
     switch_db_key(State, Key);
+screen_key(#dui_state{screen = S} = State, Key, Mods)
+        when S =:= server_info; S =:= slow_log; S =:= client_list;
+             S =:= memory_stats; S =:= live_metrics; S =:= expiring_keys;
+             S =:= logs ->
+    monitor_key(State, Key, Mods);
 screen_key(State, _Key, _Mods) ->
     {State, []}.
 
@@ -553,8 +601,11 @@ keys_nav_key(State, <<"s">>, _Mods) ->
     cycle_sort(State);
 keys_nav_key(State, <<"S">>, _Mods) ->
     toggle_sort(State);
-keys_nav_key(State, <<"l">>, _Mods) ->
-    load_more_keys(State);
+keys_nav_key(State, <<"l">>, Mods) ->
+    case lists:member(ctrl, Mods) of
+        true -> start_clients(State);
+        false -> load_more_keys(State)
+    end;
 keys_nav_key(State, <<"r">>, Mods) ->
     case lists:member(ctrl, Mods) of
         true -> start_prompt(State, regex);
@@ -577,6 +628,21 @@ keys_nav_key(State, <<"P">>, _Mods) ->
     start_templates(State);
 keys_nav_key(State, <<"=">>, _Mods) ->
     start_prompt(State, compare);
+keys_nav_key(State, <<"i">>, _Mods) ->
+    start_server_info(State);
+keys_nav_key(State, <<"L">>, _Mods) ->
+    start_slow_log(State);
+keys_nav_key(State, <<"M">>, _Mods) ->
+    start_memory_stats(State);
+keys_nav_key(State, <<"m">>, _Mods) ->
+    start_live_metrics(State);
+keys_nav_key(State, <<"x">>, Mods) ->
+    case lists:member(ctrl, Mods) of
+        true -> start_expiring(State);
+        false -> {State, []}
+    end;
+keys_nav_key(State, <<"O">>, _Mods) ->
+    start_logs(State);
 keys_nav_key(State, <<"D">>, _Mods) ->
     start_switch_db(State);
 keys_nav_key(State, _Key, _Mods) ->
@@ -1378,6 +1444,119 @@ build_compare_text(V1, V2, Diff) ->
     L2 = join_lines(dui_redis_preview:lines(V2, 200)),
     <<"Key 1:\n", L1/binary, "\n\nKey 2:\n", L2/binary, "\n\nDiff:\n", Diff/binary>>.
 
+%% -- monitoring (M5) --------------------------------------------------------
+
+-spec tick_commands(#dui_state{}) -> [educkui_command:command()].
+tick_commands(State) ->
+    Metrics = case dui_redis_state:metrics_active(State) of
+        true -> [dui_redis_cmd:load_live_metrics(State)];
+        false -> []
+    end,
+    Expiring = case dui_redis_state:screen(State) of
+        expiring_keys -> [dui_redis_cmd:load_expiring(State, 300)];
+        _ -> []
+    end,
+    Metrics ++ Expiring.
+
+-spec start_server_info(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_server_info(State) ->
+    {dui_redis_state:set_loading(State, true), [dui_redis_cmd:load_server_info(State)]}.
+
+-spec start_slow_log(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_slow_log(State) ->
+    {dui_redis_state:set_loading(State, true), [dui_redis_cmd:load_slow_log(State, 20)]}.
+
+-spec start_clients(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_clients(State) ->
+    {dui_redis_state:set_loading(State, true), [dui_redis_cmd:load_clients(State)]}.
+
+-spec start_memory_stats(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_memory_stats(State) ->
+    {dui_redis_state:set_loading(State, true), [dui_redis_cmd:load_memory_stats(State)]}.
+
+-spec start_live_metrics(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_live_metrics(State) ->
+    S1 = dui_redis_state:set_loading(State, true),
+    S2 = dui_redis_state:set_metrics_active(S1, true),
+    S3 = dui_redis_state:clear_metrics(S2),
+    {S3, [dui_redis_cmd:load_live_metrics(State)]}.
+
+-spec start_expiring(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_expiring(State) ->
+    {dui_redis_state:set_loading(State, true), [dui_redis_cmd:load_expiring(State, 300)]}.
+
+-spec start_logs(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_logs(State) ->
+    Runtime = runtime(State),
+    Text = format_logs(educkui_runtime:logs(Runtime)),
+    S1 = dui_redis_state:set_result_text(State, Text),
+    {dui_redis_state:set_screen(S1, logs), []}.
+
+-spec format_logs([map()]) -> binary().
+format_logs(Logs) ->
+    join_lines([format_log(E) || E <- Logs]).
+
+-spec format_log(map()) -> binary().
+format_log(Event) ->
+    Level = to_bin(maps:get(level, Event, info)),
+    Msg = to_bin_msg(maps:get(msg, Event, <<>>)),
+    <<"[", Level/binary, "] ", Msg/binary>>.
+
+-spec to_bin_msg(term()) -> binary().
+to_bin_msg({string, S}) -> to_bin(S);
+to_bin_msg({Format, Args}) when is_list(Format), is_list(Args) ->
+    iolist_to_binary(io_lib:format(Format, Args));
+to_bin_msg(Other) -> to_bin(Other).
+
+-spec monitor_key(#dui_state{}, term(), [atom()]) ->
+    {#dui_state{}, [educkui_command:command()]}.
+monitor_key(State, Key, _Mods) ->
+    Count = row_count(State),
+    Current = dui_redis_state:row_selected(State),
+    case Key of
+        K when K =:= <<"j">>; K =:= down ->
+            {dui_redis_state:set_row_selected(State, min(max(0, Count - 1), Current + 1)), []};
+        K when K =:= <<"k">>; K =:= up ->
+            {dui_redis_state:set_row_selected(State, max(0, Current - 1)), []};
+        K when K =:= home; K =:= <<"g">> ->
+            {dui_redis_state:set_row_selected(State, 0), []};
+        K when K =:= 'end'; K =:= <<"G">> ->
+            {dui_redis_state:set_row_selected(State, max(0, Count - 1)), []};
+        <<"r">> -> reload_monitor(State);
+        _ -> {State, []}
+    end.
+
+-spec reload_monitor(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+reload_monitor(State) ->
+    case dui_redis_state:screen(State) of
+        server_info -> {State, [dui_redis_cmd:load_server_info(State)]};
+        slow_log -> {State, [dui_redis_cmd:load_slow_log(State, 20)]};
+        client_list -> {State, [dui_redis_cmd:load_clients(State)]};
+        memory_stats -> {State, [dui_redis_cmd:load_memory_stats(State)]};
+        live_metrics -> {State, [dui_redis_cmd:load_live_metrics(State)]};
+        expiring_keys -> {State, [dui_redis_cmd:load_expiring(State, 300)]};
+        logs -> start_logs(State);
+        _ -> {State, []}
+    end.
+
+-spec row_count(#dui_state{}) -> non_neg_integer().
+row_count(State) ->
+    case dui_redis_state:screen(State) of
+        server_info -> 12;
+        slow_log -> length(dui_redis_state:slow_log(State));
+        client_list -> length(dui_redis_state:clients(State));
+        memory_stats ->
+            case dui_redis_state:memory_stats(State) of
+                undefined -> 0;
+                Stats -> 6 + length(maps:get(top_keys, Stats, []))
+            end;
+        expiring_keys -> length(dui_redis_state:expiring(State));
+        _ -> 0
+    end.
+
+-spec runtime(#dui_state{}) -> pid() | undefined.
+runtime(#dui_state{runtime = P}) -> P.
+
 %% ---------------------------------------------------------------------------
 %% State transitions
 %% ---------------------------------------------------------------------------
@@ -1566,6 +1745,11 @@ screen_view(#dui_state{screen = result_text} = State) ->
     result_text_view(State);
 screen_view(#dui_state{screen = switch_db} = State) ->
     switch_db_view(State);
+screen_view(#dui_state{screen = S} = State)
+        when S =:= server_info; S =:= slow_log; S =:= client_list;
+             S =:= memory_stats; S =:= live_metrics; S =:= expiring_keys;
+             S =:= logs ->
+    monitor_view(State);
 screen_view(_State) ->
     educkui_render_node:empty().
 
@@ -1961,6 +2145,178 @@ result_text_view(State) ->
         | [educkui_render_node:text(<<"  ", L/binary>>) || L <- Window] ++
           [footer(<<" esc back">>)]
     ]).
+
+%% -- monitoring views (M5) --------------------------------------------------
+
+-spec monitor_view(#dui_state{}) -> #dui_node{}.
+monitor_view(State) ->
+    case dui_redis_state:screen(State) of
+        server_info -> info_view(State);
+        slow_log -> slow_log_view(State);
+        client_list -> clients_view(State);
+        memory_stats -> memory_view(State);
+        live_metrics -> metrics_view(State);
+        expiring_keys -> expiring_view(State);
+        logs -> result_text_view(State);
+        _ -> educkui_render_node:empty()
+    end.
+
+-spec lines_view(#dui_state{}, binary(), binary(), [binary()], binary()) -> #dui_node{}.
+lines_view(State, Title, Header, Lines, Hints) ->
+    Count = length(Lines),
+    Selected = min(dui_redis_state:row_selected(State), max(0, Count - 1)),
+    {Rows, _} = dui_redis_state:size(State),
+    Visible = max(1, Rows - 5),
+    {Offset, _} = educkui_widget_list:visible_range(Count, Selected, Visible),
+    Body = case Lines of
+        [] ->
+            educkui_render_node:height(
+                educkui_render_node:text(<<"  (none)">>, dui_redis_theme:dim()), Visible);
+        _ ->
+            educkui_render_node:height(
+                educkui_render_node:widget(educkui_widget_list, #{
+                    items => Lines,
+                    selected => Selected - Offset,
+                    offset => 0,
+                    style => educkui_style:new(),
+                    selected_style => dui_redis_theme:selected()
+                }), Visible)
+    end,
+    HeaderNodes = case Header of
+        <<>> -> [];
+        _ -> [educkui_render_node:text(<<"  ", Header/binary>>, dui_redis_theme:subtitle())]
+    end,
+    educkui_render_node:stack(vertical,
+        [educkui_render_node:text(<<" ", Title/binary>>, dui_redis_theme:title())]
+        ++ HeaderNodes ++ [Body, footer(Hints)]).
+
+-spec info_view(#dui_state{}) -> #dui_node{}.
+info_view(State) ->
+    Info = case dui_redis_state:server_info(State) of
+        undefined -> #{};
+        I -> I
+    end,
+    Lines = [
+        kv(<<"version">>, maps:get(version, Info, <<>>)),
+        kv(<<"mode">>, maps:get(mode, Info, <<>>)),
+        kv(<<"os">>, maps:get(os, Info, <<>>)),
+        kv(<<"clients">>, maps:get(clients, Info, <<>>)),
+        kv(<<"db keys">>, maps:get(total_keys, Info, <<>>)),
+        kv(<<"used memory">>, maps:get(used_memory, Info, <<>>)),
+        kv(<<"peak memory">>, maps:get(peak_memory, Info, <<>>)),
+        kv(<<"frag ratio">>, maps:get(frag_ratio, Info, <<>>)),
+        kv(<<"total commands">>, maps:get(total_commands, Info, <<>>)),
+        kv(<<"uptime">>, dui_redis_fmt:duration(maps:get(uptime_seconds, Info, 0))),
+        kv(<<"cluster">>, dui_redis_fmt:bool(maps:get(cluster, Info, false))),
+        kv(<<"aof">>, dui_redis_fmt:bool(maps:get(aof, Info, false)))
+    ],
+    lines_view(State, <<"Server Info">>, <<>>, Lines, <<" j/k nav   r refresh   esc back">>).
+
+-spec slow_log_view(#dui_state{}) -> #dui_node{}.
+slow_log_view(State) ->
+    Lines = [slow_line(E) || E <- dui_redis_state:slow_log(State)],
+    lines_view(State, <<"Slow Log">>, <<"ID       ms     command">>, Lines,
+               <<" j/k nav   r refresh   esc back">>).
+
+-spec slow_line(map()) -> binary().
+slow_line(E) ->
+    iolist_to_binary(io_lib:format("~-8b ~-6b ~s",
+        [maps:get(id, E, 0), maps:get(duration, E, 0), to_bin(maps:get(command, E, <<>>))])).
+
+-spec clients_view(#dui_state{}) -> #dui_node{}.
+clients_view(State) ->
+    Lines = [client_line(C) || C <- dui_redis_state:clients(State)],
+    lines_view(State, <<"Clients">>, <<"ID     addr                   age   db  cmd">>, Lines,
+               <<" j/k nav   r refresh   esc back">>).
+
+-spec client_line(map()) -> binary().
+client_line(C) ->
+    iolist_to_binary(io_lib:format("~-6b ~-22s ~-5b ~-3b ~s",
+        [maps:get(id, C, 0), to_bin(maps:get(addr, C, <<>>)), maps:get(age, C, 0),
+         maps:get(db, C, 0), to_bin(maps:get(cmd, C, <<>>))])).
+
+-spec memory_view(#dui_state{}) -> #dui_node{}.
+memory_view(State) ->
+    Stats = case dui_redis_state:memory_stats(State) of
+        undefined -> #{};
+        S -> S
+    end,
+    StatsLines = [
+        kv(<<"used">>, maps:get(used, Stats, <<>>)),
+        kv(<<"peak">>, maps:get(peak, Stats, <<>>)),
+        kv(<<"rss">>, maps:get(rss, Stats, <<>>)),
+        kv(<<"frag ratio">>, maps:get(frag_ratio, Stats, <<>>)),
+        kv(<<"frag bytes">>, maps:get(frag_bytes, Stats, <<>>)),
+        kv(<<"lua">>, maps:get(lua, Stats, <<>>))
+    ],
+    TopLines = [top_key_line(K) || K <- maps:get(top_keys, Stats, [])],
+    Lines = StatsLines ++ [<<>>, <<"top keys by memory:">>] ++ TopLines,
+    lines_view(State, <<"Memory Stats">>, <<>>, Lines, <<" j/k nav   r refresh   esc back">>).
+
+-spec top_key_line(map()) -> binary().
+top_key_line(K) ->
+    iolist_to_binary(io_lib:format("~-40s ~-10s ~s",
+        [to_bin(maps:get(key, K, <<>>)),
+         dui_redis_preview:type_label(maps:get(type, K, string)),
+         dui_redis_fmt:bytes(maps:get(size, K, 0))])).
+
+-spec expiring_view(#dui_state{}) -> #dui_node{}.
+expiring_view(State) ->
+    Lines = [expiring_line(K) || K <- dui_redis_state:expiring(State)],
+    lines_view(State, <<"Expiring Keys">>,
+               <<"Key                                       TTL">>, Lines,
+               <<" j/k nav   r refresh   esc back">>).
+
+-spec expiring_line(map()) -> binary().
+expiring_line(K) ->
+    iolist_to_binary(io_lib:format("~-40s ~s",
+        [to_bin(maps:get(key, K, <<>>)),
+         dui_redis_fmt:ttl_render(maps:get(ttl, K, -1))])).
+
+-spec metrics_view(#dui_state{}) -> #dui_node{}.
+metrics_view(State) ->
+    Metrics = dui_redis_state:metrics(State),
+    Current = case Metrics of
+        [] -> #{};
+        [H | _] -> H
+    end,
+    Ops = lists:reverse([maps:get(ops, M, 0) || M <- Metrics]),
+    Mem = lists:reverse([maps:get(used_memory, M, 0) || M <- Metrics]),
+    HitRate = hit_rate(Current),
+    educkui_render_node:stack(vertical, [
+        educkui_render_node:text(<<" Live Metrics">>, dui_redis_theme:title()),
+        educkui_render_node:text(kv(<<"ops/sec">>, maps:get(ops, Current, 0))),
+        educkui_render_node:text(kv(<<"clients">>, maps:get(clients, Current, 0))),
+        educkui_render_node:text(kv(<<"blocked">>, maps:get(blocked, Current, 0))),
+        educkui_render_node:text(kv(<<"hits/misses">>,
+            iolist_to_binary(io_lib:format("~b / ~b",
+                [maps:get(hits, Current, 0), maps:get(misses, Current, 0)])))),
+        educkui_render_node:text(kv(<<"used memory">>,
+            dui_redis_fmt:bytes(maps:get(used_memory, Current, 0)))),
+        educkui_render_node:text(<<" hit rate: ", (pct(HitRate))/binary>>),
+        educkui_render_node:widget(educkui_widget_gauge, #{value => HitRate}),
+        educkui_render_node:text(<<" ops/sec history:">>),
+        educkui_render_node:widget(educkui_widget_sparkline, #{values => nonempty(Ops)}),
+        educkui_render_node:text(<<" memory history:">>),
+        educkui_render_node:widget(educkui_widget_sparkline, #{values => nonempty(Mem)}),
+        footer(<<" r refresh   esc back">>)
+    ]).
+
+-spec hit_rate(map()) -> float().
+hit_rate(#{hits := H, misses := M}) when H + M > 0 -> H / (H + M);
+hit_rate(_) -> 0.0.
+
+-spec pct(float()) -> binary().
+pct(F) ->
+    iolist_to_binary([io_lib:format("~.1f", [F * 100]), "%"]).
+
+-spec nonempty([number()]) -> [number()].
+nonempty([]) -> [0];
+nonempty(L) -> L.
+
+-spec kv(binary() | string(), term()) -> binary().
+kv(Label, Value) ->
+    iolist_to_binary(io_lib:format("  ~-14s ~s", [Label, to_bin(Value)])).
 
 %% -- confirm delete ---------------------------------------------------------
 

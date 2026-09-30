@@ -22,6 +22,8 @@
     hash_set/3, hash_delete/2, stream_add/2, stream_delete/2,
     json_set/2, memory_usage/1, key_ttl/1,
     scan_regex/2, fuzzy_search/2, search_by_value/3, compare_keys/2, json_get_path/2,
+    server_info/0, memory_stats/0, slow_log/1, client_list/0, live_metrics/0,
+    expiring_keys/1,
     build_options/1, stop/0
 ]).
 
@@ -194,6 +196,30 @@ compare_keys(Key1, Key2) -> call({compare_keys, Key1, Key2}, ?SCAN_TIMEOUT).
 -spec json_get_path(binary(), binary()) -> {ok, term()} | {error, term()}.
 json_get_path(Key, Path) -> q([<<"JSON.GET">>, Key, Path]).
 
+%% @doc Returns normalized server information (`INFO' + DBSIZE).
+-spec server_info() -> {ok, map()} | {error, term()}.
+server_info() -> call(server_info).
+
+%% @doc Returns memory statistics plus top keys by memory usage.
+-spec memory_stats() -> {ok, map()} | {error, term()}.
+memory_stats() -> call(memory_stats, ?SCAN_TIMEOUT).
+
+%% @doc Returns the most recent `N' slow log entries.
+-spec slow_log(pos_integer()) -> {ok, [map()]} | {error, term()}.
+slow_log(N) -> call({slow_log, N}).
+
+%% @doc Returns the parsed CLIENT LIST.
+-spec client_list() -> {ok, [map()]} | {error, term()}.
+client_list() -> call(client_list).
+
+%% @doc Returns a snapshot of live metrics.
+-spec live_metrics() -> {ok, map()} | {error, term()}.
+live_metrics() -> call(live_metrics).
+
+%% @doc Returns keys expiring within `Threshold' seconds.
+-spec expiring_keys(pos_integer()) -> {ok, [map()]} | {error, term()}.
+expiring_keys(Threshold) -> call({expiring_keys, Threshold}, ?SCAN_TIMEOUT).
+
 -spec stop() -> ok.
 stop() -> gen_server:stop(?SERVER).
 
@@ -265,6 +291,18 @@ handle_call({search_by_value, Pattern, Search, Max}, _From, State) ->
     {reply, with_conn(State, fun(Pid) -> do_search_by_value(Pid, Pattern, Search, Max) end), State};
 handle_call({compare_keys, Key1, Key2}, _From, State) ->
     {reply, with_conn(State, fun(Pid) -> do_compare_keys(Pid, Key1, Key2) end), State};
+handle_call(server_info, _From, State) ->
+    {reply, with_conn(State, fun do_server_info/1), State};
+handle_call(memory_stats, _From, State) ->
+    {reply, with_conn(State, fun do_memory_stats/1), State};
+handle_call({slow_log, N}, _From, State) ->
+    {reply, with_conn(State, fun(Pid) -> do_slow_log(Pid, N) end), State};
+handle_call(client_list, _From, State) ->
+    {reply, with_conn(State, fun do_client_list/1), State};
+handle_call(live_metrics, _From, State) ->
+    {reply, with_conn(State, fun do_live_metrics/1), State};
+handle_call({expiring_keys, Threshold}, _From, State) ->
+    {reply, with_conn(State, fun(Pid) -> do_expiring_keys(Pid, Threshold) end), State};
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
@@ -771,6 +809,179 @@ enrich(Pid, Keys) ->
     K0 = [#{key => K, type => string, ttl => -1} || K <- Keys],
     K1 = fill_type_ttl(Pid, K0),
     detect_string_subtypes(Pid, detect_zset_subtypes(Pid, K1)).
+
+%% ---------------------------------------------------------------------------
+%% Monitoring
+%% ---------------------------------------------------------------------------
+
+-spec do_server_info(pid()) -> {ok, map()} | {error, term()}.
+do_server_info(Pid) ->
+    case eredis:q(Pid, [<<"INFO">>]) of
+        {ok, Bin} ->
+            Info = dui_redis_info:parse(Bin),
+            Total = case do_db_size(Pid) of {ok, N} -> N; _ -> 0 end,
+            {ok, #{
+                version => dui_redis_info:get(<<"redis_version">>, Info, <<>>),
+                mode => dui_redis_info:get(<<"redis_mode">>, Info, <<>>),
+                os => dui_redis_info:get(<<"os">>, Info, <<>>),
+                used_memory => dui_redis_info:get(<<"used_memory_human">>, Info, <<>>),
+                peak_memory => dui_redis_info:get(<<"used_memory_peak_human">>, Info, <<>>),
+                clients => dui_redis_info:get(<<"connected_clients">>, Info, <<>>),
+                total_keys => integer_to_binary(Total),
+                uptime_seconds => num(<<"uptime_in_seconds">>, Info),
+                cluster => dui_redis_info:get(<<"cluster_enabled">>, Info, <<"0">>) =:= <<"1">>,
+                aof => dui_redis_info:get(<<"aof_enabled">>, Info, <<"0">>) =:= <<"1">>,
+                frag_ratio => dui_redis_info:get(<<"mem_fragmentation_ratio">>, Info, <<>>),
+                total_commands => dui_redis_info:get(<<"total_commands_processed">>, Info, <<>>)
+            }};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+-spec do_memory_stats(pid()) -> {ok, map()} | {error, term()}.
+do_memory_stats(Pid) ->
+    case eredis:q(Pid, [<<"INFO">>, <<"memory">>]) of
+        {ok, Bin} ->
+            Info = dui_redis_info:parse(Bin),
+            {ok, #{
+                used => dui_redis_info:get(<<"used_memory_human">>, Info, <<>>),
+                peak => dui_redis_info:get(<<"used_memory_peak_human">>, Info, <<>>),
+                frag_ratio => dui_redis_info:get(<<"mem_fragmentation_ratio">>, Info, <<>>),
+                frag_bytes => dui_redis_info:get(<<"mem_fragmentation_bytes">>, Info, <<>>),
+                rss => dui_redis_info:get(<<"used_memory_rss_human">>, Info, <<>>),
+                lua => dui_redis_info:get(<<"used_memory_lua_human">>, Info, <<>>),
+                top_keys => top_keys(Pid, 20)
+            }};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+-spec top_keys(pid(), pos_integer()) -> [map()].
+top_keys(Pid, Limit) ->
+    Keys = lists:sublist(scan_all_keys(Pid, <<"*">>), Limit * 5),
+    Cmds = lists:flatmap(
+        fun(K) -> [[<<"MEMORY">>, <<"USAGE">>, K], [<<"TYPE">>, K]] end, Keys),
+    case eredis:qp(Pid, Cmds) of
+        Results when is_list(Results) ->
+            Values = [case R of {ok, V} -> V; _ -> undefined end || R <- Results],
+            Pairs = pair_up(Values),
+            Entries = lists:filtermap(
+                fun({K, {SizeBin, TypeBin}}) ->
+                    case is_binary(SizeBin) of
+                        true -> {true, #{key => K, size => to_int(SizeBin, 0),
+                                         type => dui_redis_type:to_type(TypeBin)}};
+                        false -> false
+                    end;
+                   (_) -> false
+                end,
+                lists:zip(Keys, Pairs)),
+            Sorted = lists:sort(
+                fun(A, B) -> maps:get(size, A, 0) >= maps:get(size, B, 0) end, Entries),
+            lists:sublist(Sorted, Limit);
+        _ ->
+            []
+    end.
+
+-spec do_slow_log(pid(), pos_integer()) -> {ok, [map()]} | {error, term()}.
+do_slow_log(Pid, N) ->
+    case eredis:q(Pid, [<<"SLOWLOG">>, <<"GET">>, integer_to_binary(N)]) of
+        {ok, Entries} when is_list(Entries) -> {ok, [parse_slow(E) || E <- Entries]};
+        {ok, _} -> {ok, []};
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec parse_slow(term()) -> map().
+parse_slow([Id, Time, Duration, Args, Addr, Name]) ->
+    #{id => to_int(Id, 0), time => to_int(Time, 0), duration => to_int(Duration, 0),
+      command => join_args(Args), addr => to_bin(Addr), name => to_bin(Name)};
+parse_slow(_) ->
+    #{}.
+
+-spec join_args(term()) -> binary().
+join_args(Args) when is_list(Args) ->
+    iolist_to_binary(lists:join(<<" ">>, [to_bin(A) || A <- Args]));
+join_args(Other) ->
+    to_bin(Other).
+
+-spec do_client_list(pid()) -> {ok, [map()]} | {error, term()}.
+do_client_list(Pid) ->
+    case eredis:q(Pid, [<<"CLIENT">>, <<"LIST">>]) of
+        {ok, Bin} when is_binary(Bin) ->
+            Lines = [L || L <- binary:split(Bin, <<"\n">>, [global]), L =/= <<>>],
+            {ok, [parse_client(L) || L <- Lines]};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+-spec parse_client(binary()) -> map().
+parse_client(Line) ->
+    Fields = [binary:split(F, <<"=">>) || F <- binary:split(Line, <<" ">>, [global]), F =/= <<>>],
+    Map = lists:foldl(
+        fun([K, V], Acc) -> maps:put(K, V, Acc);
+           (_, Acc) -> Acc
+        end, #{}, Fields),
+    #{id => to_int(maps:get(<<"id">>, Map, <<"0">>), 0),
+      addr => maps:get(<<"addr">>, Map, <<>>),
+      name => maps:get(<<"name">>, Map, <<>>),
+      age => to_int(maps:get(<<"age">>, Map, <<"0">>), 0),
+      idle => to_int(maps:get(<<"idle">>, Map, <<"0">>), 0),
+      flags => maps:get(<<"flags">>, Map, <<>>),
+      db => to_int(maps:get(<<"db">>, Map, <<"0">>), 0),
+      cmd => maps:get(<<"cmd">>, Map, <<>>),
+      sub => to_int(maps:get(<<"sub">>, Map, <<"0">>), 0)}.
+
+-spec do_live_metrics(pid()) -> {ok, map()} | {error, term()}.
+do_live_metrics(Pid) ->
+    %% Redis < 7.0 only accepts a single INFO section, so fetch all.
+    case eredis:q(Pid, [<<"INFO">>]) of
+        {ok, Bin} ->
+            Info = dui_redis_info:parse(Bin),
+            {ok, #{
+                ops => num(<<"instantaneous_ops_per_sec">>, Info),
+                used_memory => num(<<"used_memory">>, Info),
+                clients => num(<<"connected_clients">>, Info),
+                blocked => num(<<"blocked_clients">>, Info),
+                hits => num(<<"keyspace_hits">>, Info),
+                misses => num(<<"keyspace_misses">>, Info),
+                expired => num(<<"expired_keys">>, Info),
+                evicted => num(<<"evicted_keys">>, Info),
+                input_kbps => fnum(<<"instantaneous_input_kbps">>, Info),
+                output_kbps => fnum(<<"instantaneous_output_kbps">>, Info),
+                cpu_sys => fnum(<<"used_cpu_sys">>, Info),
+                cpu_user => fnum(<<"used_cpu_user">>, Info),
+                total_connections => num(<<"total_connections_received">>, Info),
+                rejected => num(<<"rejected_connections">>, Info)
+            }};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+-spec do_expiring_keys(pid(), pos_integer()) -> {ok, [map()]} | {error, term()}.
+do_expiring_keys(Pid, Threshold) ->
+    Keys = lists:sublist(scan_all_keys(Pid, <<"*">>), 2000),
+    Enriched = enrich(Pid, Keys),
+    Expiring = [K || K <- Enriched, expiring(K, Threshold)],
+    Sorted = lists:sort(fun(A, B) -> maps:get(ttl, A, 0) =< maps:get(ttl, B, 0) end, Expiring),
+    {ok, Sorted}.
+
+-spec expiring(map(), pos_integer()) -> boolean().
+expiring(Key, Threshold) ->
+    Ttl = maps:get(ttl, Key, -1),
+    Ttl > 0 andalso Ttl =< Threshold.
+
+-spec num(binary(), map()) -> integer().
+num(Key, Info) ->
+    case dui_redis_info:int(Key, Info) of
+        undefined -> 0;
+        N -> N
+    end.
+
+-spec fnum(binary(), map()) -> float().
+fnum(Key, Info) ->
+    case dui_redis_info:float(Key, Info) of
+        undefined -> 0.0;
+        F -> F
+    end.
 
 %% ---------------------------------------------------------------------------
 %% Small helpers

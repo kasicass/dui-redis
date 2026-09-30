@@ -34,6 +34,12 @@
     search_by_value/3,
     compare_keys/2,
     json_get_path/2,
+    load_server_info/1,
+    load_slow_log/2,
+    load_clients/1,
+    load_memory_stats/1,
+    load_live_metrics/1,
+    load_expiring/2,
     switch_db/2,
     debounce_filter/3
 ]).
@@ -238,6 +244,44 @@ conn_id(State) ->
         undefined -> 0;
         Conn -> maps:get(id, Conn, 0)
     end.
+
+%% -- monitoring -------------------------------------------------------------
+
+-spec load_server_info(#dui_state{}) -> educkui_command:command().
+load_server_info(_State) ->
+    educkui_command:exec(fun() ->
+        {server_info_loaded, safe(fun() -> dui_redis_client:server_info() end)}
+    end).
+
+-spec load_slow_log(#dui_state{}, pos_integer()) -> educkui_command:command().
+load_slow_log(_State, N) ->
+    educkui_command:exec(fun() ->
+        {slow_log_loaded, safe(fun() -> dui_redis_client:slow_log(N) end)}
+    end).
+
+-spec load_clients(#dui_state{}) -> educkui_command:command().
+load_clients(_State) ->
+    educkui_command:exec(fun() ->
+        {clients_loaded, safe(fun() -> dui_redis_client:client_list() end)}
+    end).
+
+-spec load_memory_stats(#dui_state{}) -> educkui_command:command().
+load_memory_stats(_State) ->
+    educkui_command:exec(fun() ->
+        {memory_stats_loaded, safe(fun() -> dui_redis_client:memory_stats() end)}
+    end).
+
+-spec load_live_metrics(#dui_state{}) -> educkui_command:command().
+load_live_metrics(_State) ->
+    educkui_command:exec(fun() ->
+        {live_metrics_loaded, safe(fun() -> dui_redis_client:live_metrics() end)}
+    end).
+
+-spec load_expiring(#dui_state{}, pos_integer()) -> educkui_command:command().
+load_expiring(_State, Threshold) ->
+    educkui_command:exec(fun() ->
+        {expiring_loaded, safe(fun() -> dui_redis_client:expiring_keys(Threshold) end)}
+    end).
 
 %% @doc Switches the active database.
 -spec switch_db(#dui_state{}, integer()) -> educkui_command:command().
