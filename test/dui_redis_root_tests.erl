@@ -102,6 +102,7 @@ live_connect_flow_test_() ->
 live_connect_flow() ->
     stop_client(),
     {ok, _} = application:ensure_all_started(dui_redis),
+    seed_keys(),
     Dir = mk_tmp(),
     Path = filename:join(Dir, "config.json"),
     save_conn(Path, <<"Local">>, <<"localhost">>, 6379),
@@ -111,7 +112,48 @@ live_connect_flow() ->
     ok = educkui_test:send_key(Pid, enter),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
         fun(S) -> S#dui_state.connected end, 300)),
-    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Connected to Local">>)),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> length(S#dui_state.keys) >= 1 end, 200)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"m2:str">>)),
+    cleanup(Pid, Dir),
+    _ = application:stop(dui_redis),
+    ok.
+
+live_keys_browse_test_() ->
+    case redis_available() of
+        true -> {timeout, 40, fun live_keys_browse/0};
+        false -> []
+    end.
+
+live_keys_browse() ->
+    stop_client(),
+    {ok, _} = application:ensure_all_started(dui_redis),
+    seed_keys(),
+    Dir = mk_tmp(),
+    Path = filename:join(Dir, "config.json"),
+    save_conn(Path, <<"Local">>, <<"localhost">>, 6379),
+    Pid = educkui_test:start(#{root => dui_redis_root, size => {24, 120},
+                               init_args => [{opts, #{config_path => Path}}]}),
+    ok = educkui_test:send_event(Pid, educkui_event:resize(120, 24)),
+    ?assertEqual(ok, educkui_test:sync(Pid)),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 100)),
+    ok = educkui_test:send_key(Pid, enter),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> length(S#dui_state.keys) >= 3 end, 200)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Filter:">>)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Preview">>)),
+    %% navigate and sort should not crash
+    ok = educkui_test:send_keys(Pid, [<<"j">>, <<"j">>, <<"s">>, <<"S">>, <<"g">>, <<"G">>]),
+    ?assertEqual(ok, educkui_test:sync(Pid)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"m2:str">>)),
+    %% typing 'q' in the filter must NOT quit the app
+    ok = educkui_test:send_key(Pid, <<"/">>),
+    ok = educkui_test:send_keys(Pid, [<<"q">>, <<"u">>, <<"e">>]),
+    ?assertEqual(ok, educkui_test:sync(Pid)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"que">>)),
+    ok = educkui_test:send_key(Pid, esc),
+    ?assertEqual(ok, educkui_test:sync(Pid)),
     cleanup(Pid, Dir),
     _ = application:stop(dui_redis),
     ok.
@@ -130,6 +172,15 @@ start_root_path(Path) ->
 save_conn(Path, Name, Host, Port) ->
     {ok, _} = dui_redis_config:add_connection(Path,
         #{name => Name, host => Host, port => Port}),
+    ok.
+
+seed_keys() ->
+    {ok, C} = eredis:start_link([{host, "localhost"}, {port, 6379}, {database, 0}]),
+    _ = eredis:q(C, [<<"FLUSHDB">>]),
+    _ = eredis:q(C, [<<"SET">>, <<"m2:str">>, <<"hello">>]),
+    _ = eredis:q(C, [<<"RPUSH">>, <<"m2:list">>, <<"a">>, <<"b">>]),
+    _ = eredis:q(C, [<<"HSET">>, <<"m2:hash">>, <<"f">>, <<"v">>]),
+    eredis:stop(C),
     ok.
 
 cleanup(Pid, Dir) ->

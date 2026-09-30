@@ -30,6 +30,34 @@
     set_connection_error/2,
     connected/1,
     set_connected/2,
+    keys/1,
+    set_keys/3,
+    replace_keys/2,
+    selected_key/1,
+    set_selected_key/2,
+    key_cursor/1,
+    set_key_cursor/2,
+    key_pattern/1,
+    set_key_pattern/2,
+    total_keys/1,
+    set_total_keys/2,
+    sort_by/1,
+    sort_asc/1,
+    set_sort_by/2,
+    toggle_sort_asc/1,
+    filter_active/1,
+    set_filter_active/2,
+    filter_edit/1,
+    set_filter_edit/2,
+    search_seq/1,
+    bump_search_seq/1,
+    preview_key/1,
+    set_preview/3,
+    preview_value/1,
+    loading_keys/1,
+    set_loading_keys/2,
+    db_input/1,
+    set_db_input/2,
     status/1,
     show_help/1,
     config_path/1,
@@ -156,6 +184,97 @@ connected(#dui_state{connected = Connected}) -> Connected.
 -spec set_connected(#dui_state{}, boolean()) -> #dui_state{}.
 set_connected(State, Connected) when is_boolean(Connected) ->
     State#dui_state{connected = Connected}.
+
+-spec keys(#dui_state{}) -> [map()].
+keys(#dui_state{keys = Keys}) -> Keys.
+
+%% @doc Replaces the key list. When `Cursor' is 0 the list is reset, otherwise
+%% `Keys' are appended (paging).
+-spec set_keys(#dui_state{}, [map()], integer()) -> #dui_state{}.
+set_keys(#dui_state{keys = Existing} = State, Keys, 0) ->
+    _ = Existing,
+    State#dui_state{keys = Keys, selected_key = 0, loading_keys = false};
+set_keys(#dui_state{keys = Existing} = State, Keys, _Cursor) ->
+    State#dui_state{keys = Existing ++ Keys, loading_keys = false}.
+
+-spec replace_keys(#dui_state{}, [map()]) -> #dui_state{}.
+replace_keys(State, Keys) -> State#dui_state{keys = Keys}.
+
+-spec selected_key(#dui_state{}) -> non_neg_integer().
+selected_key(#dui_state{selected_key = N}) -> N.
+
+-spec set_selected_key(#dui_state{}, non_neg_integer()) -> #dui_state{}.
+set_selected_key(State, N) -> State#dui_state{selected_key = max(0, N)}.
+
+-spec key_cursor(#dui_state{}) -> non_neg_integer().
+key_cursor(#dui_state{key_cursor = C}) -> C.
+
+-spec set_key_cursor(#dui_state{}, non_neg_integer()) -> #dui_state{}.
+set_key_cursor(State, C) -> State#dui_state{key_cursor = max(0, C)}.
+
+-spec key_pattern(#dui_state{}) -> binary().
+key_pattern(#dui_state{key_pattern = P}) -> P.
+
+-spec set_key_pattern(#dui_state{}, binary()) -> #dui_state{}.
+set_key_pattern(State, Pattern) -> State#dui_state{key_pattern = Pattern}.
+
+-spec total_keys(#dui_state{}) -> integer().
+total_keys(#dui_state{total_keys = N}) -> N.
+
+-spec set_total_keys(#dui_state{}, integer()) -> #dui_state{}.
+set_total_keys(State, N) -> State#dui_state{total_keys = N}.
+
+-spec sort_by(#dui_state{}) -> key | type | ttl.
+sort_by(#dui_state{sort_by = By}) -> By.
+
+-spec sort_asc(#dui_state{}) -> boolean().
+sort_asc(#dui_state{sort_asc = Asc}) -> Asc.
+
+-spec set_sort_by(#dui_state{}, key | type | ttl) -> #dui_state{}.
+set_sort_by(State, By) -> State#dui_state{sort_by = By}.
+
+-spec toggle_sort_asc(#dui_state{}) -> #dui_state{}.
+toggle_sort_asc(#dui_state{sort_asc = Asc} = State) -> State#dui_state{sort_asc = not Asc}.
+
+-spec filter_active(#dui_state{}) -> boolean().
+filter_active(#dui_state{filter_active = B}) -> B.
+
+-spec set_filter_active(#dui_state{}, boolean()) -> #dui_state{}.
+set_filter_active(State, B) -> State#dui_state{filter_active = B}.
+
+-spec filter_edit(#dui_state{}) -> term() | undefined.
+filter_edit(#dui_state{filter_edit = E}) -> E.
+
+-spec set_filter_edit(#dui_state{}, term()) -> #dui_state{}.
+set_filter_edit(State, Edit) -> State#dui_state{filter_edit = Edit}.
+
+-spec search_seq(#dui_state{}) -> integer().
+search_seq(#dui_state{search_seq = S}) -> S.
+
+-spec bump_search_seq(#dui_state{}) -> {integer(), #dui_state{}}.
+bump_search_seq(#dui_state{search_seq = S} = State) ->
+    {S + 1, State#dui_state{search_seq = S + 1}}.
+
+-spec preview_key(#dui_state{}) -> binary().
+preview_key(#dui_state{preview_key = K}) -> K.
+
+-spec set_preview(#dui_state{}, binary(), map() | undefined) -> #dui_state{}.
+set_preview(State, Key, Value) -> State#dui_state{preview_key = Key, preview_value = Value}.
+
+-spec preview_value(#dui_state{}) -> map() | undefined.
+preview_value(#dui_state{preview_value = V}) -> V.
+
+-spec loading_keys(#dui_state{}) -> boolean().
+loading_keys(#dui_state{loading_keys = B}) -> B.
+
+-spec set_loading_keys(#dui_state{}, boolean()) -> #dui_state{}.
+set_loading_keys(State, B) -> State#dui_state{loading_keys = B}.
+
+-spec db_input(#dui_state{}) -> term() | undefined.
+db_input(#dui_state{db_input = E}) -> E.
+
+-spec set_db_input(#dui_state{}, term()) -> #dui_state{}.
+set_db_input(State, Edit) -> State#dui_state{db_input = Edit}.
 
 -spec status(#dui_state{}) -> {info | error, binary()} | undefined.
 status(#dui_state{status = Status}) -> Status.

@@ -15,7 +15,11 @@
     delete_connection/2,
     connect/1,
     disconnect/0,
-    test_connection/1
+    test_connection/1,
+    load_keys/4,
+    load_preview/2,
+    switch_db/2,
+    debounce_filter/3
 ]).
 
 %% @doc Asynchronously loads the whole config file.
@@ -77,6 +81,36 @@ disconnect() ->
 test_connection(Conn) ->
     educkui_command:exec(fun() ->
         {connection_tested, safe(fun() -> dui_redis_client:test(Conn) end)}
+    end).
+
+%% @doc Scans keys with the given pattern and cursor.
+-spec load_keys(#dui_state{}, binary(), integer(), integer()) -> educkui_command:command().
+load_keys(_State, Pattern, Cursor, Count) ->
+    educkui_command:exec(fun() ->
+        {keys_loaded, Cursor,
+         safe(fun() -> dui_redis_client:scan_keys(Pattern, Cursor, Count) end)}
+    end).
+
+%% @doc Loads a bounded value preview for `Key'.
+-spec load_preview(#dui_state{}, binary()) -> educkui_command:command().
+load_preview(_State, Key) ->
+    educkui_command:exec(fun() ->
+        {preview_loaded, Key, safe(fun() -> dui_redis_client:value_preview(Key) end)}
+    end).
+
+%% @doc Switches the active database.
+-spec switch_db(#dui_state{}, integer()) -> educkui_command:command().
+switch_db(_State, Db) ->
+    educkui_command:exec(fun() ->
+        {db_switched, Db, safe(fun() -> dui_redis_client:select_db(Db) end)}
+    end).
+
+%% @doc Debounces a live filter: sleeps briefly then reports back with `Seq'.
+-spec debounce_filter(#dui_state{}, binary(), integer()) -> educkui_command:command().
+debounce_filter(_State, Pattern, Seq) ->
+    educkui_command:exec(fun() ->
+        timer:sleep(250),
+        {filter_debounced, Seq, Pattern}
     end).
 
 %% ---------------------------------------------------------------------------

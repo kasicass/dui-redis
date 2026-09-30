@@ -4,6 +4,8 @@
 -export([
     screen_name/1,
     ttl/1,
+    ttl_render/1,
+    type_render/1,
     connection_label/1,
     join/2
 ]).
@@ -27,6 +29,18 @@ ttl(0) ->
     <<"expired">>;
 ttl(Ttl) ->
     iolist_to_binary(io_lib:format("~pms", [Ttl])).
+
+%% @doc Formats a Redis TTL in seconds for display.
+-spec ttl_render(integer()) -> binary().
+ttl_render(-1) -> <<"no expiry">>;
+ttl_render(-2) -> <<"expired">>;
+ttl_render(S) when S > 0 -> <<(integer_to_binary(S))/binary, "s">>;
+ttl_render(_) -> <<>>.
+
+%% @doc Human-readable key type.
+-spec type_render(atom()) -> binary().
+type_render(Type) ->
+    dui_redis_preview:type_label(Type).
 
 %% @doc Formats a connection map as `Name (host:port)'.
 -spec connection_label(map()) -> binary().

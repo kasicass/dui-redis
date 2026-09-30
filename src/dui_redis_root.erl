@@ -84,7 +84,8 @@ update({connected, ok}, State) ->
     S2 = dui_redis_state:set_connected(S1, true),
     S3 = dui_redis_state:set_connection_error(S2, undefined),
     S4 = dui_redis_state:set_loading(S3, false),
-    {dui_redis_state:set_status(S4, info, <<"Connected">>), []};
+    S5 = dui_redis_state:set_status(S4, info, <<"Connected">>),
+    reload_keys(S5);
 update({connected, {error, Reason}}, State) ->
     S1 = dui_redis_state:set_loading(State, false),
     S2 = dui_redis_state:set_connection_error(S1, error_text(Reason)),
@@ -94,6 +95,41 @@ update({disconnected, _}, State) ->
     S2 = dui_redis_state:set_connected(S1, false),
     S3 = dui_redis_state:set_current_conn(S2, undefined),
     {dui_redis_state:set_status(S3, info, <<"Disconnected">>), []};
+update({keys_loaded, Cursor, {ok, Result}}, State) ->
+    Keys = maps:get(keys, Result, []),
+    Next = maps:get(cursor, Result, 0),
+    Total = maps:get(total, Result, 0),
+    S1 = dui_redis_state:set_keys(State, Keys, Cursor),
+    S2 = dui_redis_state:set_key_cursor(S1, Next),
+    S3 = dui_redis_state:set_total_keys(S2, Total),
+    S4 = sort_state_keys(clamp_selected(S3)),
+    load_selected_preview(S4);
+update({keys_loaded, _Cursor, {error, Reason}}, State) ->
+    S1 = dui_redis_state:set_loading_keys(State, false),
+    {dui_redis_state:set_status(S1, error, error_text(Reason)), []};
+update({preview_loaded, Key, {ok, Value}}, State) ->
+    case dui_redis_state:preview_key(State) =:= Key of
+        true -> {dui_redis_state:set_preview(State, Key, Value), []};
+        false -> {State, []}
+    end;
+update({preview_loaded, _Key, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({db_switched, _Db, {error, Reason}}, State) ->
+    S1 = dui_redis_state:set_screen(State, keys),
+    {dui_redis_state:set_status(S1, error, error_text(Reason)), []};
+update({db_switched, Db, ok}, State) ->
+    Msg = <<"Switched to db", (integer_to_binary(Db))/binary>>,
+    S1 = dui_redis_state:set_screen(State, keys),
+    S2 = dui_redis_state:set_status(S1, info, Msg),
+    reload_keys(S2);
+update({filter_debounced, Seq, Pattern}, State) ->
+    case dui_redis_state:search_seq(State) =:= Seq of
+        true ->
+            S1 = dui_redis_state:set_key_pattern(State, Pattern),
+            reload_keys(S1);
+        false ->
+            {State, []}
+    end;
 update({key, Key, Mods}, State) ->
     handle_event(Key, Mods, State);
 update(_Msg, State) ->
@@ -134,14 +170,29 @@ handle_global(<<"c">>, Mods, State) ->
         true -> {State, [educkui_command:quit()]};
         false -> screen_key(State, <<"c">>, Mods)
     end;
-handle_global(<<"q">>, _Mods, State) ->
-    {State, [educkui_command:quit()]};
-handle_global(<<"?">>, _Mods, State) ->
-    {dui_redis_state:toggle_help(State), []};
+handle_global(<<"q">>, Mods, State) ->
+    case text_entry_active(State) of
+        true -> screen_key(State, <<"q">>, Mods);
+        false -> {State, [educkui_command:quit()]}
+    end;
+handle_global(<<"?">>, Mods, State) ->
+    case text_entry_active(State) of
+        true -> screen_key(State, <<"?">>, Mods);
+        false -> {dui_redis_state:toggle_help(State), []}
+    end;
 handle_global(Key, Mods, State) ->
     screen_key(State, Key, Mods).
 
+-spec text_entry_active(#dui_state{}) -> boolean().
+text_entry_active(#dui_state{screen = connection_form}) -> true;
+text_entry_active(#dui_state{screen = switch_db}) -> true;
+text_entry_active(#dui_state{filter_active = true}) -> true;
+text_entry_active(_State) -> false.
+
 -spec handle_escape(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+handle_escape(#dui_state{filter_active = true} = State) ->
+    S1 = dui_redis_state:set_filter_active(State, false),
+    {dui_redis_state:set_filter_edit(S1, undefined), []};
 handle_escape(#dui_state{screen = connection_form} = State) ->
     cancel_form(State);
 handle_escape(#dui_state{screen = test_connection} = State) ->
@@ -151,6 +202,8 @@ handle_escape(#dui_state{screen = confirm_delete} = State) ->
     {dui_redis_state:set_screen(S1, connections), []};
 handle_escape(#dui_state{screen = keys} = State) ->
     {dui_redis_state:set_loading(State, true), [dui_redis_cmd:disconnect()]};
+handle_escape(#dui_state{screen = switch_db} = State) ->
+    {dui_redis_state:set_screen(State, keys), []};
 handle_escape(State) ->
     {dui_redis_state:clear_status(State), []}.
 
@@ -164,8 +217,10 @@ screen_key(#dui_state{screen = test_connection} = State, Key, _Mods) ->
     test_key(State, Key);
 screen_key(#dui_state{screen = confirm_delete} = State, Key, _Mods) ->
     confirm_key(State, Key);
-screen_key(#dui_state{screen = keys} = State, Key, _Mods) ->
-    keys_key(State, Key);
+screen_key(#dui_state{screen = keys} = State, Key, Mods) ->
+    keys_screen_key(State, Key, Mods);
+screen_key(#dui_state{screen = switch_db} = State, Key, _Mods) ->
+    switch_db_key(State, Key);
 screen_key(State, _Key, _Mods) ->
     {State, []}.
 
@@ -319,11 +374,238 @@ do_delete(State) ->
             {dui_redis_state:clear_confirm(State), []}
     end.
 
-%% -- keys (placeholder) -----------------------------------------------------
+%% -- keys -------------------------------------------------------------------
 
--spec keys_key(#dui_state{}, term()) -> {#dui_state{}, [educkui_command:command()]}.
-keys_key(State, _Key) ->
+-spec keys_screen_key(#dui_state{}, term(), [atom()]) ->
+    {#dui_state{}, [educkui_command:command()]}.
+keys_screen_key(State, Key, Mods) ->
+    case dui_redis_state:filter_active(State) of
+        true -> filter_key(State, Key);
+        false -> keys_nav_key(State, Key, Mods)
+    end.
+
+-spec keys_nav_key(#dui_state{}, term(), [atom()]) ->
+    {#dui_state{}, [educkui_command:command()]}.
+keys_nav_key(State, Key, _Mods) when Key =:= <<"j">>; Key =:= down ->
+    move_key(State, 1);
+keys_nav_key(State, Key, _Mods) when Key =:= <<"k">>; Key =:= up ->
+    move_key(State, -1);
+keys_nav_key(State, page_down, _Mods) ->
+    move_key(State, 10);
+keys_nav_key(State, page_up, _Mods) ->
+    move_key(State, -10);
+keys_nav_key(State, <<"d">>, Mods) ->
+    case lists:member(ctrl, Mods) of
+        true -> move_key(State, 10);
+        false -> {State, []}
+    end;
+keys_nav_key(State, <<"u">>, Mods) ->
+    case lists:member(ctrl, Mods) of
+        true -> move_key(State, -10);
+        false -> {State, []}
+    end;
+keys_nav_key(State, Key, _Mods) when Key =:= home; Key =:= <<"g">> ->
+    select_key(State, 0);
+keys_nav_key(State, Key, _Mods) when Key =:= 'end'; Key =:= <<"G">> ->
+    Count = length(dui_redis_state:keys(State)),
+    select_key(State, max(0, Count - 1));
+keys_nav_key(State, enter, _Mods) ->
+    key_detail(State);
+keys_nav_key(State, <<"/">>, _Mods) ->
+    start_filter(State);
+keys_nav_key(State, <<"s">>, _Mods) ->
+    cycle_sort(State);
+keys_nav_key(State, <<"S">>, _Mods) ->
+    toggle_sort(State);
+keys_nav_key(State, <<"l">>, _Mods) ->
+    load_more_keys(State);
+keys_nav_key(State, <<"r">>, _Mods) ->
+    reload_keys(State);
+keys_nav_key(State, <<"D">>, _Mods) ->
+    start_switch_db(State);
+keys_nav_key(State, _Key, _Mods) ->
     {State, []}.
+
+-spec filter_key(#dui_state{}, term()) -> {#dui_state{}, [educkui_command:command()]}.
+filter_key(State, enter) ->
+    Edit = dui_redis_state:filter_edit(State),
+    Pattern = normalize_pattern(educkui_lineedit:value(Edit)),
+    S1 = dui_redis_state:set_filter_active(State, false),
+    S2 = dui_redis_state:set_key_pattern(S1, Pattern),
+    reload_keys(S2);
+filter_key(State, esc) ->
+    S1 = dui_redis_state:set_filter_active(State, false),
+    {dui_redis_state:set_filter_edit(S1, undefined), []};
+filter_key(State, Key) ->
+    Edit0 = dui_redis_state:filter_edit(State),
+    Edit1 = case Key of
+        backspace -> educkui_lineedit:backspace(Edit0);
+        delete -> educkui_lineedit:delete(Edit0);
+        left -> educkui_lineedit:move(left, Edit0);
+        right -> educkui_lineedit:move(right, Edit0);
+        home -> educkui_lineedit:home(Edit0);
+        'end' -> educkui_lineedit:'end'(Edit0);
+        K when is_binary(K) -> educkui_lineedit:insert(K, Edit0);
+        _ -> Edit0
+    end,
+    S1 = dui_redis_state:set_filter_edit(State, Edit1),
+    {Seq, S2} = dui_redis_state:bump_search_seq(S1),
+    Pattern = normalize_pattern(educkui_lineedit:value(Edit1)),
+    {S2, [dui_redis_cmd:debounce_filter(State, Pattern, Seq)]}.
+
+-spec start_filter(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_filter(State) ->
+    Edit = educkui_lineedit:new(<<>>),
+    S1 = dui_redis_state:set_filter_edit(State, Edit),
+    {dui_redis_state:set_filter_active(S1, true), []}.
+
+-spec switch_db_key(#dui_state{}, term()) -> {#dui_state{}, [educkui_command:command()]}.
+switch_db_key(State, enter) ->
+    Edit = dui_redis_state:db_input(State),
+    case parse_int(educkui_lineedit:value(Edit)) of
+        {ok, Db} ->
+            {dui_redis_state:set_loading(State, true), [dui_redis_cmd:switch_db(State, Db)]};
+        error ->
+            {dui_redis_state:set_status(State, error, <<"Invalid database number">>), []}
+    end;
+switch_db_key(State, Key) ->
+    Edit0 = dui_redis_state:db_input(State),
+    Edit1 = case Key of
+        backspace -> educkui_lineedit:backspace(Edit0);
+        delete -> educkui_lineedit:delete(Edit0);
+        left -> educkui_lineedit:move(left, Edit0);
+        right -> educkui_lineedit:move(right, Edit0);
+        home -> educkui_lineedit:home(Edit0);
+        'end' -> educkui_lineedit:'end'(Edit0);
+        K when is_binary(K) -> educkui_lineedit:insert(K, Edit0);
+        _ -> Edit0
+    end,
+    {dui_redis_state:set_db_input(State, Edit1), []}.
+
+-spec start_switch_db(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_switch_db(State) ->
+    Db = case dui_redis_state:current_conn(State) of
+        undefined -> 0;
+        Conn -> maps:get(db, Conn, 0)
+    end,
+    Edit = educkui_lineedit:new(integer_to_binary(Db)),
+    S1 = dui_redis_state:set_db_input(State, Edit),
+    {dui_redis_state:set_screen(S1, switch_db), []}.
+
+%% -- keys state transitions -------------------------------------------------
+
+-spec reload_keys(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+reload_keys(State) ->
+    Pattern = dui_redis_state:key_pattern(State),
+    S1 = dui_redis_state:set_loading_keys(State, true),
+    {S1, [dui_redis_cmd:load_keys(State, Pattern, 0, scan_size(State))]}.
+
+-spec load_more_keys(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+load_more_keys(State) ->
+    case dui_redis_state:key_cursor(State) of
+        0 ->
+            {State, []};
+        Cursor ->
+            Pattern = dui_redis_state:key_pattern(State),
+            S1 = dui_redis_state:set_loading_keys(State, true),
+            {S1, [dui_redis_cmd:load_keys(State, Pattern, Cursor, scan_size(State))]}
+    end.
+
+-spec move_key(#dui_state{}, integer()) -> {#dui_state{}, [educkui_command:command()]}.
+move_key(State, Delta) ->
+    Count = length(dui_redis_state:keys(State)),
+    Current = dui_redis_state:selected_key(State),
+    Target = max(0, min(max(0, Count - 1), Current + Delta)),
+    select_key(State, Target).
+
+-spec select_key(#dui_state{}, non_neg_integer()) ->
+    {#dui_state{}, [educkui_command:command()]}.
+select_key(State, Index) ->
+    S1 = dui_redis_state:set_selected_key(State, Index),
+    load_selected_preview(S1).
+
+-spec load_selected_preview(#dui_state{}) ->
+    {#dui_state{}, [educkui_command:command()]}.
+load_selected_preview(State) ->
+    case selected_key_map(State) of
+        undefined ->
+            {dui_redis_state:set_preview(State, <<>>, undefined), []};
+        #{key := Key} ->
+            S1 = dui_redis_state:set_preview(State, Key, undefined),
+            {S1, [dui_redis_cmd:load_preview(State, Key)]}
+    end.
+
+-spec key_detail(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+key_detail(State) ->
+    case selected_key_map(State) of
+        undefined ->
+            {State, []};
+        #{key := Key} ->
+            Msg = <<"Key detail arrives in M3: ", Key/binary>>,
+            {dui_redis_state:set_status(State, info, Msg), []}
+    end.
+
+-spec selected_key_map(#dui_state{}) -> map() | undefined.
+selected_key_map(State) ->
+    case dui_redis_state:keys(State) of
+        [] -> undefined;
+        Keys ->
+            Index = min(dui_redis_state:selected_key(State), length(Keys) - 1),
+            lists:nth(Index + 1, Keys)
+    end.
+
+-spec cycle_sort(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+cycle_sort(State) ->
+    Next = case dui_redis_state:sort_by(State) of
+        key -> type;
+        type -> ttl;
+        ttl -> key
+    end,
+    apply_sort(dui_redis_state:set_sort_by(State, Next)).
+
+-spec toggle_sort(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+toggle_sort(State) ->
+    apply_sort(dui_redis_state:toggle_sort_asc(State)).
+
+-spec apply_sort(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+apply_sort(State) ->
+    load_selected_preview(clamp_selected(sort_state_keys(State))).
+
+-spec sort_state_keys(#dui_state{}) -> #dui_state{}.
+sort_state_keys(State) ->
+    Sorted = dui_redis_type:sort_keys(
+        dui_redis_state:keys(State),
+        dui_redis_state:sort_by(State),
+        dui_redis_state:sort_asc(State)),
+    dui_redis_state:replace_keys(State, Sorted).
+
+-spec clamp_selected(#dui_state{}) -> #dui_state{}.
+clamp_selected(State) ->
+    Count = length(dui_redis_state:keys(State)),
+    Index = min(dui_redis_state:selected_key(State), max(0, Count - 1)),
+    dui_redis_state:set_selected_key(State, Index).
+
+-spec scan_size(#dui_state{}) -> pos_integer().
+scan_size(State) ->
+    case maps:get(scan_size, dui_redis_state:cli(State), 1000) of
+        N when is_integer(N), N > 0 -> N;
+        _ -> 1000
+    end.
+
+-spec normalize_pattern(binary()) -> binary().
+normalize_pattern(<<>>) ->
+    <<"*">>;
+normalize_pattern(Raw) ->
+    case binary:match(Raw, [<<"*">>, <<"?">>, <<"[">>, <<"]">>]) of
+        nomatch -> <<"*", Raw/binary, "*">>;
+        _ -> Raw
+    end.
+
+-spec parse_int(binary()) -> {ok, integer()} | error.
+parse_int(Bin) ->
+    try {ok, binary_to_integer(string:trim(Bin))}
+    catch error:badarg -> error
+    end.
 
 %% ---------------------------------------------------------------------------
 %% State transitions
@@ -499,6 +781,8 @@ screen_view(#dui_state{screen = confirm_delete} = State) ->
     ]);
 screen_view(#dui_state{screen = keys} = State) ->
     keys_view(State);
+screen_view(#dui_state{screen = switch_db} = State) ->
+    switch_db_view(State);
 screen_view(_State) ->
     educkui_render_node:empty().
 
@@ -673,23 +957,129 @@ confirm_view(State) ->
         height => 6
     }).
 
-%% -- keys placeholder -------------------------------------------------------
+%% -- keys -------------------------------------------------------------------
 
 -spec keys_view(#dui_state{}) -> #dui_node{}.
 keys_view(State) ->
-    Conn = dui_redis_state:current_conn(State),
-    Name = case Conn of
-        undefined -> <<"Redis">>;
-        _ -> to_bin(maps:get(name, Conn, <<"Redis">>))
+    {_, Cols} = dui_redis_state:size(State),
+    Body = case Cols >= 100 of
+        true ->
+            ListW = (Cols * 6) div 10,
+            PreviewW = max(10, Cols - ListW - 1),
+            educkui_render_node:stack(horizontal, [
+                educkui_render_node:width(keys_panel(State, ListW), ListW),
+                educkui_render_node:width(preview_panel(State), PreviewW)
+            ]);
+        false ->
+            keys_panel(State, Cols)
+    end,
+    educkui_render_node:stack(vertical, [Body, footer(keys_hints(State))]).
+
+-spec keys_panel(#dui_state{}, pos_integer()) -> #dui_node{}.
+keys_panel(State, Width) ->
+    Pattern = displayed_pattern(State),
+    FilterNode = case dui_redis_state:filter_active(State) of
+        true ->
+            educkui_render_node:text(<<" Filter: ", Pattern/binary, "_">>, dui_redis_theme:info());
+        false ->
+            educkui_render_node:text(<<" Filter: ", Pattern/binary>>, dui_redis_theme:subtitle())
+    end,
+    {Rows, _} = dui_redis_state:size(State),
+    Visible = max(1, Rows - 6),
+    Keys = dui_redis_state:keys(State),
+    Total = length(Keys),
+    Selected = min(dui_redis_state:selected_key(State), max(0, Total - 1)),
+    {Offset, _} = educkui_widget_list:visible_range(Total, Selected, Visible),
+    Window = lists:sublist(Keys, Offset + 1, Visible),
+    KeyW = max(10, Width - 26),
+    RowsData = [[display_name(K), dui_redis_preview:type_label(maps:get(type, K, string)),
+                 dui_redis_fmt:ttl_render(maps:get(ttl, K, -1))] || K <- Window],
+    Table = case RowsData of
+        [] ->
+            educkui_render_node:height(
+                educkui_render_node:text(<<"  No keys found.">>, dui_redis_theme:dim()),
+                Visible);
+        _ ->
+            educkui_render_node:height(
+                educkui_render_node:widget(educkui_widget_table, #{
+                    header => [<<"Key">>, <<"Type">>, <<"TTL">>],
+                    rows => RowsData,
+                    widths => [KeyW, 11, 12],
+                    selected => Selected - Offset,
+                    style => educkui_style:new(),
+                    selected_style => dui_redis_theme:selected(),
+                    header_style => dui_redis_theme:subtitle()
+                }), Visible)
+    end,
+    Count = iolist_to_binary(io_lib:format(" Keys ~b/~b", [Total, dui_redis_state:total_keys(State)])),
+    educkui_render_node:stack(vertical, [
+        educkui_render_node:text(Count, dui_redis_theme:subtitle()),
+        FilterNode,
+        Table
+    ]).
+
+-spec preview_panel(#dui_state{}) -> #dui_node{}.
+preview_panel(State) ->
+    case dui_redis_state:preview_value(State) of
+        undefined ->
+            educkui_render_node:stack(vertical, [
+                educkui_render_node:text(<<" Preview">>, dui_redis_theme:subtitle()),
+                educkui_render_node:text(<<"  (select a key)">>, dui_redis_theme:dim())
+            ]);
+        Value ->
+            Summary = dui_redis_preview:summary(Value),
+            Lines = dui_redis_preview:lines(Value, 200),
+            educkui_render_node:stack(vertical, [
+                educkui_render_node:text(<<" Preview">>, dui_redis_theme:subtitle()),
+                educkui_render_node:text(<<"  ", Summary/binary>>, dui_redis_theme:info()),
+                educkui_render_node:text(<<>>)
+                | [educkui_render_node:text(<<"  ", Line/binary>>) || Line <- Lines]
+            ])
+    end.
+
+-spec switch_db_view(#dui_state{}) -> #dui_node{}.
+switch_db_view(State) ->
+    Edit = dui_redis_state:db_input(State),
+    Value = case Edit of
+        undefined -> <<>>;
+        _ -> educkui_lineedit:value(Edit)
     end,
     educkui_render_node:stack(vertical, [
-        educkui_render_node:text(<<"">>),
-        educkui_render_node:text(<<"  Connected to ", Name/binary>>, dui_redis_theme:success()),
-        educkui_render_node:text(<<"">>),
-        educkui_render_node:text(
-            <<"  Key browser arrives in M2. Press esc to disconnect, q to quit.">>,
-            dui_redis_theme:dim())
+        educkui_render_node:text(<<>>),
+        educkui_render_node:text(<<"  Switch Database">>, dui_redis_theme:subtitle()),
+        educkui_render_node:text(<<>>),
+        educkui_render_node:text(<<"  db: ", Value/binary, "_">>, dui_redis_theme:info()),
+        educkui_render_node:text(<<>>),
+        footer(<<" enter switch   esc cancel">>)
     ]).
+
+-spec displayed_pattern(#dui_state{}) -> binary().
+displayed_pattern(State) ->
+    case dui_redis_state:filter_active(State) of
+        true ->
+            case dui_redis_state:filter_edit(State) of
+                undefined -> <<>>;
+                Edit -> educkui_lineedit:value(Edit)
+            end;
+        false ->
+            dui_redis_state:key_pattern(State)
+    end.
+
+-spec display_name(map()) -> binary().
+display_name(Key) -> to_bin(maps:get(key, Key, <<>>)).
+
+-spec keys_hints(#dui_state{}) -> binary().
+keys_hints(State) ->
+    Loading = case dui_redis_state:loading_keys(State) of
+        true -> <<"  loading...">>;
+        false -> <<>>
+    end,
+    More = case dui_redis_state:key_cursor(State) of
+        0 -> <<>>;
+        _ -> <<"  l more">>
+    end,
+    iolist_to_binary([" j/k nav   Enter view   / filter   s sort", More,
+                      "   r refresh   D db   esc disconnect   q quit", Loading]).
 
 %% -- shared -----------------------------------------------------------------
 

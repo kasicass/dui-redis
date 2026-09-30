@@ -4,8 +4,9 @@
 %% safe when the client is not running (they return `{error, no_client}'), so
 %% application code never crashes on a missing process.
 %%
-%% M1 supports standalone connections; cluster mode is reported as
-%% unsupported until M6.
+%% Supports standalone connections; cluster mode is reported as unsupported
+%% until M6. Key/value reads are bounded (preview: 100 items / 64 KB) so a
+%% huge key never blocks the UI or transfers megabytes.
 -module(dui_redis_client).
 
 -behaviour(gen_server).
@@ -14,6 +15,7 @@
     start_link/0,
     connect/1, disconnect/0, test/1, select_db/1,
     ping/0, q/1, q/2, is_connected/0, current/0,
+    scan_keys/3, value_preview/1, db_size/0,
     build_options/1, stop/0
 ]).
 
@@ -21,6 +23,10 @@
 
 -define(SERVER, ?MODULE).
 -define(CALL_TIMEOUT, 15000).
+-define(SCAN_TIMEOUT, 20000).
+-define(PREVIEW_MAX_ITEMS, 100).
+-define(PREVIEW_MAX_BYTES, 65536).
+-define(PROBE_BYTES, 256).
 
 %% ---------------------------------------------------------------------------
 %% API
@@ -32,52 +38,55 @@ start_link() ->
 
 %% @doc Connects to the Redis instance described by `Conn'.
 -spec connect(map()) -> ok | {error, term()}.
-connect(Conn) ->
-    call({connect, Conn}).
+connect(Conn) -> call({connect, Conn}).
 
 %% @doc Closes the active connection.
 -spec disconnect() -> ok.
-disconnect() ->
-    call(disconnect).
+disconnect() -> call(disconnect).
 
 %% @doc Opens a temporary connection, PINGs it, and closes it.
-%% Returns the measured latency in milliseconds on success.
 -spec test(map()) -> {ok, non_neg_integer()} | {error, term()}.
-test(Conn) ->
-    call({test, Conn}).
+test(Conn) -> call({test, Conn}).
 
 %% @doc Switches the active database (standalone only).
 -spec select_db(integer()) -> ok | {error, term()}.
-select_db(Db) ->
-    call({select_db, Db}).
+select_db(Db) -> call({select_db, Db}).
 
 %% @doc PINGs the active connection.
 -spec ping() -> {ok, term()} | {error, term()}.
-ping() ->
-    q([<<"PING">>]).
+ping() -> q([<<"PING">>]).
 
 %% @doc Runs a command on the active connection.
 -spec q([term()]) -> {ok, term()} | {error, term()}.
-q(Command) ->
-    call({q, Command}).
+q(Command) -> call({q, Command}).
 
 %% @doc Runs a command with a custom timeout.
 -spec q([term()], timeout()) -> {ok, term()} | {error, term()}.
-q(Command, Timeout) ->
-    call({q, Command}, Timeout).
+q(Command, Timeout) -> call({q, Command}, Timeout).
 
 -spec is_connected() -> boolean().
-is_connected() ->
-    call(is_connected).
+is_connected() -> call(is_connected).
 
 %% @doc Returns the currently connected config map, if any.
 -spec current() -> {ok, map()} | undefined.
-current() ->
-    call(current).
+current() -> call(current).
+
+%% @doc SCANs keys, enriching each with TYPE and TTL. Returns
+%% `{ok, #{keys := [map()], cursor := integer(), total := integer()}}'.
+-spec scan_keys(binary(), integer(), integer()) -> {ok, map()} | {error, term()}.
+scan_keys(Pattern, Cursor, Count) ->
+    call({scan_keys, Pattern, Cursor, Count}, ?SCAN_TIMEOUT).
+
+%% @doc Returns a bounded preview of the value at `Key'.
+-spec value_preview(binary()) -> {ok, map()} | {error, term()}.
+value_preview(Key) -> call({value_preview, Key}, ?SCAN_TIMEOUT).
+
+%% @doc Returns the number of keys in the current database.
+-spec db_size() -> {ok, non_neg_integer()} | {error, term()}.
+db_size() -> call(db_size).
 
 -spec stop() -> ok.
-stop() ->
-    gen_server:stop(?SERVER).
+stop() -> gen_server:stop(?SERVER).
 
 %% ---------------------------------------------------------------------------
 %% Option building (pure, unit-testable)
@@ -131,6 +140,12 @@ handle_call(current, _From, State) ->
         undefined -> {reply, undefined, State};
         Conn -> {reply, {ok, Conn}, State}
     end;
+handle_call({scan_keys, Pattern, Cursor, Count}, _From, State) ->
+    {reply, with_conn(State, fun(Pid) -> do_scan_keys(Pid, Pattern, Cursor, Count) end), State};
+handle_call({value_preview, Key}, _From, State) ->
+    {reply, with_conn(State, fun(Pid) -> do_value_preview(Pid, Key) end), State};
+handle_call(db_size, _From, State) ->
+    {reply, with_conn(State, fun do_db_size/1), State};
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
@@ -147,12 +162,11 @@ terminate(_Reason, State) ->
     ok.
 
 %% ---------------------------------------------------------------------------
-%% Internal
+%% Connection helpers
 %% ---------------------------------------------------------------------------
 
 -spec call(term()) -> term().
-call(Request) ->
-    call(Request, ?CALL_TIMEOUT).
+call(Request) -> call(Request, ?CALL_TIMEOUT).
 
 -spec call(term(), timeout()) -> term().
 call(Request, Timeout) ->
@@ -161,10 +175,17 @@ call(Request, Timeout) ->
         _ -> gen_server:call(?SERVER, Request, Timeout)
     end.
 
+-spec with_conn(map(), fun((pid()) -> T)) -> T | {error, term()}.
+with_conn(#{conn := Pid}, Fun) when is_pid(Pid) ->
+    try Fun(Pid)
+    catch Class:Reason -> {error, {Class, Reason}}
+    end;
+with_conn(_State, _Fun) ->
+    {error, not_connected}.
+
 -spec do_connect(map(), map()) -> {reply, ok | {error, term()}, map()}.
 do_connect(Conn, State) ->
-    Options = build_options(Conn),
-    case start_eredis(Options) of
+    case start_eredis(build_options(Conn)) of
         {ok, Pid} ->
             case eredis:q(Pid, [<<"PING">>]) of
                 {ok, <<"PONG">>} ->
@@ -188,18 +209,14 @@ do_test(Conn) ->
             Result = eredis:q(Pid, [<<"PING">>]),
             _ = safe_stop(Pid),
             case Result of
-                {ok, <<"PONG">>} ->
-                    {ok, erlang:monotonic_time(millisecond) - Start};
-                {ok, Other} ->
-                    {error, {unexpected_reply, Other}};
-                {error, Reason} ->
-                    {error, Reason}
+                {ok, <<"PONG">>} -> {ok, erlang:monotonic_time(millisecond) - Start};
+                {ok, Other} -> {error, {unexpected_reply, Other}};
+                {error, Reason} -> {error, Reason}
             end;
         {error, Reason} ->
             {error, Reason}
     end.
 
-%% @doc Starts an eredis client, converting exceptions into error tuples.
 -spec start_eredis([term()]) -> {ok, pid()} | {error, term()}.
 start_eredis(Options) ->
     try eredis:start_link(Options) of
@@ -217,12 +234,9 @@ safe_stop(Pid) ->
 -spec do_select_db(integer(), map()) -> ok | {error, term()}.
 do_select_db(Db, #{conn := Pid}) when is_pid(Pid) ->
     case eredis:q(Pid, [<<"SELECT">>, integer_to_binary(Db)]) of
-        {ok, <<"OK">>} ->
-            ok;
-        {ok, _Other} ->
-            ok;
-        {error, Reason} ->
-            {error, Reason}
+        {ok, <<"OK">>} -> ok;
+        {ok, _Other} -> ok;
+        {error, Reason} -> {error, Reason}
     end;
 do_select_db(_Db, _State) ->
     {error, not_connected}.
@@ -269,3 +283,314 @@ to_list(B) when is_binary(B) -> binary_to_list(B);
 to_list(L) when is_list(L) -> L;
 to_list(A) when is_atom(A) -> atom_to_list(A);
 to_list(I) when is_integer(I) -> integer_to_list(I).
+
+%% ---------------------------------------------------------------------------
+%% Key scanning
+%% ---------------------------------------------------------------------------
+
+-spec do_scan_keys(pid(), binary(), integer(), integer()) -> {ok, map()} | {error, term()}.
+do_scan_keys(Pid, Pattern, Cursor, Count) ->
+    Cmd = [<<"SCAN">>, integer_to_binary(Cursor), <<"MATCH">>, Pattern,
+           <<"COUNT">>, integer_to_binary(Count)],
+    case eredis:q(Pid, Cmd) of
+        {ok, [NextBin, KeyBins]} ->
+            Keys0 = [#{key => K, type => string, ttl => -1} || K <- KeyBins],
+            Keys1 = fill_type_ttl(Pid, Keys0),
+            Keys2 = detect_string_subtypes(Pid, detect_zset_subtypes(Pid, Keys1)),
+            Total = case do_db_size(Pid) of {ok, N} -> N; _ -> 0 end,
+            {ok, #{keys => Keys2, cursor => to_int(NextBin, 0), total => Total}};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+-spec fill_type_ttl(pid(), [map()]) -> [map()].
+fill_type_ttl(_Pid, []) ->
+    [];
+fill_type_ttl(Pid, Keys) ->
+    Cmds = lists:flatmap(
+        fun(#{key := K}) -> [[<<"TYPE">>, K], [<<"TTL">>, K]] end, Keys),
+    case eredis:qp(Pid, Cmds) of
+        Results when is_list(Results) ->
+            Values = [case R of {ok, V} -> V; _ -> undefined end || R <- Results],
+            Pairs = pair_up(Values),
+            lists:zipwith(
+                fun(Key, {TypeBin, TtlBin}) ->
+                    Key#{type => dui_redis_type:to_type(TypeBin),
+                         ttl => to_int(TtlBin, -1)}
+                end,
+                Keys, Pairs);
+        _ ->
+            Keys
+    end.
+
+-spec detect_string_subtypes(pid(), [map()]) -> [map()].
+detect_string_subtypes(Pid, Keys) ->
+    Names = [maps:get(key, K) || K <- Keys, maps:get(type, K, undefined) =:= string],
+    case Names of
+        [] ->
+            Keys;
+        _ ->
+            Cmds = [[<<"GETRANGE">>, N, <<"0">>, integer_to_binary(?PROBE_BYTES - 1)] || N <- Names],
+            case eredis:qp(Pid, Cmds) of
+                Results when is_list(Results) ->
+                    Probing = maps:from_list(
+                        lists:zip(Names, [probe(R) || R <- Results])),
+                    [maybe_string_subtype(K, Probing) || K <- Keys];
+                _ ->
+                    Keys
+            end
+    end.
+
+-spec maybe_string_subtype(map(), map()) -> map().
+maybe_string_subtype(#{type := string, key := Name} = K, Probing) ->
+    case maps:get(Name, Probing, undefined) of
+        undefined -> K;
+        Bin -> K#{type => dui_redis_type:detect_string_subtype(Bin)}
+    end;
+maybe_string_subtype(K, _Probing) ->
+    K.
+
+-spec detect_zset_subtypes(pid(), [map()]) -> [map()].
+detect_zset_subtypes(Pid, Keys) ->
+    Names = [maps:get(key, K) || K <- Keys, maps:get(type, K, undefined) =:= zset],
+    case Names of
+        [] ->
+            Keys;
+        _ ->
+            Cmds = [[<<"ZRANGE">>, N, <<"0">>, <<"0">>, <<"WITHSCORES">>] || N <- Names],
+            case eredis:qp(Pid, Cmds) of
+                Results when is_list(Results) ->
+                    Scores = maps:from_list(lists:zip(Names, [zscore(R) || R <- Results])),
+                    [maybe_zset_subtype(K, Scores) || K <- Keys];
+                _ ->
+                    Keys
+            end
+    end.
+
+-spec maybe_zset_subtype(map(), map()) -> map().
+maybe_zset_subtype(#{type := zset, key := Name} = K, Scores) ->
+    case maps:get(Name, Scores, undefined) of
+        undefined -> K;
+        S when is_float(S) ->
+            case dui_redis_type:looks_like_geoscores([S]) of
+                true -> K#{type => geo};
+                false -> K
+            end;
+        _ -> K
+    end;
+maybe_zset_subtype(K, _Scores) ->
+    K.
+
+-spec probe(term()) -> binary() | undefined.
+probe({ok, V}) when is_binary(V) -> V;
+probe(_) -> undefined.
+
+-spec zscore(term()) -> float() | undefined.
+zscore({ok, [_Member, Score]}) -> to_float(Score);
+zscore(_) -> undefined.
+
+%% ---------------------------------------------------------------------------
+%% Value preview
+%% ---------------------------------------------------------------------------
+
+-spec do_value_preview(pid(), binary()) -> {ok, map()} | {error, term()}.
+do_value_preview(Pid, Key) ->
+    case eredis:q(Pid, [<<"TYPE">>, Key]) of
+        {ok, TypeBin} ->
+            fetch_value(Pid, Key, dui_redis_type:to_type(TypeBin),
+                        ?PREVIEW_MAX_ITEMS, ?PREVIEW_MAX_BYTES);
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+-spec fetch_value(pid(), binary(), atom(), pos_integer(), pos_integer()) ->
+    {ok, map()} | {error, term()}.
+fetch_value(_Pid, _Key, none, _MaxItems, _MaxBytes) ->
+    {ok, #{type => none}};
+fetch_value(Pid, Key, string, _MaxItems, MaxBytes) ->
+    fetch_string(Pid, Key, MaxBytes);
+fetch_value(Pid, Key, list, MaxItems, _MaxBytes) ->
+    fetch_list(Pid, Key, MaxItems);
+fetch_value(Pid, Key, set, MaxItems, _MaxBytes) ->
+    fetch_set(Pid, Key, MaxItems);
+fetch_value(Pid, Key, zset, MaxItems, _MaxBytes) ->
+    fetch_zset(Pid, Key, MaxItems);
+fetch_value(Pid, Key, geo, MaxItems, _MaxBytes) ->
+    fetch_zset(Pid, Key, MaxItems);
+fetch_value(Pid, Key, hash, MaxItems, _MaxBytes) ->
+    fetch_hash(Pid, Key, MaxItems);
+fetch_value(Pid, Key, stream, MaxItems, _MaxBytes) ->
+    fetch_stream(Pid, Key, MaxItems);
+fetch_value(Pid, Key, json, _MaxItems, _MaxBytes) ->
+    fetch_json(Pid, Key);
+fetch_value(_Pid, _Key, Type, _MaxItems, _MaxBytes) ->
+    {ok, #{type => Type}}.
+
+-spec fetch_string(pid(), binary(), pos_integer()) -> {ok, map()} | {error, term()}.
+fetch_string(Pid, Key, MaxBytes) ->
+    Total = to_int(q_val(Pid, [<<"STRLEN">>, Key]), 0),
+    case eredis:q(Pid, [<<"GETRANGE">>, Key, <<"0">>, integer_to_binary(MaxBytes - 1)]) of
+        {ok, Bin} ->
+            Truncated = Total > byte_size(Bin),
+            Type = dui_redis_type:detect_string_subtype(Bin),
+            Base = #{type => Type, truncated => Truncated, total => Total, text => Bin},
+            case Type of
+                hll -> {ok, Base#{count => to_int(q_val(Pid, [<<"PFCOUNT">>, Key]), 0)}};
+                bitmap -> {ok, Base#{bitcount => to_int(q_val(Pid, [<<"BITCOUNT">>, Key]), 0)}};
+                _ -> {ok, Base}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+-spec fetch_list(pid(), binary(), pos_integer()) -> {ok, map()} | {error, term()}.
+fetch_list(Pid, Key, MaxItems) ->
+    Total = to_int(q_val(Pid, [<<"LLEN">>, Key]), 0),
+    Items = case eredis:q(Pid, [<<"LRANGE">>, Key, <<"0">>, integer_to_binary(MaxItems - 1)]) of
+        {ok, L} -> L;
+        _ -> []
+    end,
+    {ok, #{type => list, items => Items,
+           truncated => Total > length(Items), total => Total}}.
+
+-spec fetch_set(pid(), binary(), pos_integer()) -> {ok, map()} | {error, term()}.
+fetch_set(Pid, Key, MaxItems) ->
+    Total = to_int(q_val(Pid, [<<"SCARD">>, Key]), 0),
+    Items = lists:sublist(scan_collect(Pid, [<<"SSCAN">>, Key], MaxItems), MaxItems),
+    {ok, #{type => set, items => Items,
+           truncated => Total > length(Items), total => Total}}.
+
+-spec fetch_hash(pid(), binary(), pos_integer()) -> {ok, map()} | {error, term()}.
+fetch_hash(Pid, Key, MaxItems) ->
+    Total = to_int(q_val(Pid, [<<"HLEN">>, Key]), 0),
+    Flat = lists:sublist(scan_collect(Pid, [<<"HSCAN">>, Key], MaxItems * 2), MaxItems * 2),
+    Items = pair_up(Flat),
+    {ok, #{type => hash, items => Items,
+           truncated => Total > length(Items), total => Total}}.
+
+-spec fetch_zset(pid(), binary(), pos_integer()) -> {ok, map()} | {error, term()}.
+fetch_zset(Pid, Key, MaxItems) ->
+    Total = to_int(q_val(Pid, [<<"ZCARD">>, Key]), 0),
+    case eredis:q(Pid, [<<"ZRANGE">>, Key, <<"0">>,
+                        integer_to_binary(MaxItems - 1), <<"WITHSCORES">>]) of
+        {ok, Flat} ->
+            Members = [{M, to_float(S)} || {M, S} <- pair_up(Flat)],
+            Truncated = Total > length(Members),
+            Scores = [S || {_, S} <- Members],
+            case dui_redis_type:looks_like_geoscores(Scores) of
+                true ->
+                    case geopos(Pid, Key, [M || {M, _} <- Members]) of
+                        [] ->
+                            {ok, #{type => zset, items => Members,
+                                   truncated => Truncated, total => Total}};
+                        GeoMembers ->
+                            {ok, #{type => geo, items => GeoMembers,
+                                   truncated => Truncated, total => Total}}
+                    end;
+                false ->
+                    {ok, #{type => zset, items => Members,
+                           truncated => Truncated, total => Total}}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+-spec fetch_stream(pid(), binary(), pos_integer()) -> {ok, map()} | {error, term()}.
+fetch_stream(Pid, Key, MaxItems) ->
+    Total = to_int(q_val(Pid, [<<"XLEN">>, Key]), 0),
+    case eredis:q(Pid, [<<"XRANGE">>, Key, <<"-">>, <<"+">>,
+                        <<"COUNT">>, integer_to_binary(MaxItems)]) of
+        {ok, Entries} ->
+            Items = [{Id, pair_up(Fields)} || [Id, Fields] <- Entries],
+            {ok, #{type => stream, items => Items,
+                   truncated => Total > length(Items), total => Total}};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+-spec fetch_json(pid(), binary()) -> {ok, map()} | {error, term()}.
+fetch_json(Pid, Key) ->
+    case eredis:q(Pid, [<<"JSON.GET">>, Key, <<"$">>]) of
+        {ok, Bin} -> {ok, #{type => json, text => Bin}};
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec geopos(pid(), binary(), [binary()]) -> [{binary(), float(), float()}].
+geopos(_Pid, _Key, []) ->
+    [];
+geopos(Pid, Key, Members) ->
+    case eredis:q(Pid, [<<"GEOPOS">>, Key | Members]) of
+        {ok, Positions} when is_list(Positions), length(Positions) =:= length(Members) ->
+            lists:filtermap(
+                fun({Member, Pos}) ->
+                    case Pos of
+                        [LonBin, LatBin] -> {true, {Member, to_float(LonBin), to_float(LatBin)}};
+                        _ -> false
+                    end
+                end,
+                lists:zip(Members, Positions));
+        _ ->
+            []
+    end.
+
+%% @doc Collects elements across SSCAN/HSCAN pages until `Max' or cursor 0.
+-spec scan_collect(pid(), [binary()], pos_integer()) -> [binary()].
+scan_collect(Pid, [Cmd, Key], Max) ->
+    scan_collect(Pid, [Cmd, Key], <<"0">>, Max, []).
+
+-spec scan_collect(pid(), [binary()], binary(), pos_integer(), [binary()]) -> [binary()].
+scan_collect(_Pid, _Cmd, _Cursor, Max, Acc) when length(Acc) >= Max ->
+    Acc;
+scan_collect(Pid, [Cmd, Key], Cursor, Max, Acc) ->
+    case eredis:q(Pid, [Cmd, Key, Cursor, <<"COUNT">>, integer_to_binary(Max)]) of
+        {ok, [NextBin, Batch]} when is_list(Batch) ->
+            Acc1 = Acc ++ Batch,
+            case NextBin of
+                <<"0">> -> Acc1;
+                _ -> scan_collect(Pid, [Cmd, Key], NextBin, Max, Acc1)
+            end;
+        _ ->
+            Acc
+    end.
+
+-spec do_db_size(pid()) -> {ok, non_neg_integer()} | {error, term()}.
+do_db_size(Pid) ->
+    case eredis:q(Pid, [<<"DBSIZE">>]) of
+        {ok, NBin} -> {ok, to_int(NBin, 0)};
+        {error, Reason} -> {error, Reason}
+    end.
+
+%% ---------------------------------------------------------------------------
+%% Small helpers
+%% ---------------------------------------------------------------------------
+
+-spec q_val(pid(), [term()]) -> term().
+q_val(Pid, Cmd) ->
+    case eredis:q(Pid, Cmd) of
+        {ok, V} -> V;
+        _ -> undefined
+    end.
+
+-spec pair_up([term()]) -> [{term(), term()}].
+pair_up([A, B | Rest]) -> [{A, B} | pair_up(Rest)];
+pair_up(_) -> [].
+
+-spec to_int(term(), integer()) -> integer().
+to_int(Bin, _Default) when is_integer(Bin) -> Bin;
+to_int(Bin, Default) when is_binary(Bin) ->
+    try binary_to_integer(Bin)
+    catch error:badarg -> Default
+    end;
+to_int(_Other, Default) -> Default.
+
+-spec to_float(term()) -> float().
+to_float(F) when is_float(F) -> F;
+to_float(I) when is_integer(I) -> float(I);
+to_float(Bin) when is_binary(Bin) ->
+    try binary_to_float(Bin)
+    catch error:badarg ->
+        try binary_to_integer(Bin) * 1.0
+        catch error:badarg -> 0.0
+        end
+    end;
+to_float(_Other) -> 0.0.

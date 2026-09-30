@@ -66,6 +66,37 @@ live_test() ->
     ?assertMatch({error, _}, dui_redis_client:test(
         #{host => <<"127.0.0.1">>, port => 6399})).
 
+live_scan_and_preview_test_() ->
+    case redis_available() of
+        true -> {timeout, 30, fun live_scan_and_preview/0};
+        false -> []
+    end.
+
+live_scan_and_preview() ->
+    ensure_client(),
+    ok = dui_redis_client:connect(#{host => <<"localhost">>, port => 6379, db => 0}),
+    {ok, _} = dui_redis_client:q([<<"FLUSHDB">>]),
+    {ok, _} = dui_redis_client:q([<<"SET">>, <<"m2:str">>, <<"hello">>]),
+    {ok, _} = dui_redis_client:q([<<"RPUSH">>, <<"m2:list">>, <<"a">>, <<"b">>]),
+    {ok, _} = dui_redis_client:q([<<"HSET">>, <<"m2:hash">>, <<"f">>, <<"v">>]),
+    {ok, R} = dui_redis_client:scan_keys(<<"m2:*">>, 0, 100),
+    Keys = maps:get(keys, R),
+    ?assertEqual(3, length(Keys)),
+    TypeMap = maps:from_list([{maps:get(key, K), maps:get(type, K)} || K <- Keys]),
+    ?assertEqual(string, maps:get(<<"m2:str">>, TypeMap)),
+    ?assertEqual(list, maps:get(<<"m2:list">>, TypeMap)),
+    ?assertEqual(hash, maps:get(<<"m2:hash">>, TypeMap)),
+    ?assertEqual(3, maps:get(total, R)),
+
+    {ok, SV} = dui_redis_client:value_preview(<<"m2:str">>),
+    ?assertEqual(string, maps:get(type, SV)),
+    ?assertEqual(<<"hello">>, maps:get(text, SV)),
+    {ok, LV} = dui_redis_client:value_preview(<<"m2:list">>),
+    ?assertEqual([<<"a">>, <<"b">>], maps:get(items, LV)),
+    {ok, HV} = dui_redis_client:value_preview(<<"m2:hash">>),
+    ?assertEqual([{<<"f">>, <<"v">>}], maps:get(items, HV)),
+    ok = dui_redis_client:disconnect().
+
 %% ---------------------------------------------------------------------------
 
 ensure_client() ->
