@@ -1,5 +1,9 @@
 {"1.2.0",
-[{<<"eredis">>,{pkg,<<"eredis">>,<<"1.7.1">>},0}]}.
+[{<<"educkui">>,
+  {git,"https://github.com/kasicass/educkui.git",
+       {ref,"9818028e0080301f563eac9e08a48c5dd7657c14"}},
+  0},
+ {<<"eredis">>,{pkg,<<"eredis">>,<<"1.7.1">>},0}]}.
 [
 {pkg_hash,[
  {<<"eredis">>, <<"39E31AA02ADCD651C657F39AAFD4D31A9B2F63C6C700DC9CECE98D4BC3C897AB">>}]},
