@@ -19,7 +19,18 @@
     update_connection/2,
     delete_connection/2,
     normalize_connection/1,
-    next_id/1
+    next_id/1,
+    list_favorites/2,
+    add_favorite/4,
+    remove_favorite/3,
+    is_favorite/3,
+    list_recent/2,
+    add_recent/4,
+    clear_recent/2,
+    list_templates/1,
+    add_template/2,
+    delete_template/2,
+    default_templates/0
 ]).
 
 -define(DIR, ".config/dui-redis").
@@ -87,11 +98,31 @@ defaults() ->
     #{connections => [],
       favorites => [],
       recent_keys => [],
-      templates => [],
+      templates => default_templates(),
       tree_separator => <<":">>,
       max_recent_keys => 20,
       max_value_history => 50,
       watch_interval_ms => 1000}.
+
+%% @doc Built-in key templates (mirrors redis-tui).
+-spec default_templates() -> [map()].
+default_templates() ->
+    [#{name => <<"Session">>, description => <<"User session data">>,
+       key_pattern => <<"session:{user_id}">>, type => <<"hash">>,
+       default_ttl => 86400, default_value => <<>>,
+       fields => #{token => <<>>, created_at => <<>>, user_agent => <<>>}},
+     #{name => <<"Cache">>, description => <<"Cached data with TTL">>,
+       key_pattern => <<"cache:{resource}:{id}">>, type => <<"string">>,
+       default_ttl => 3600, default_value => <<>>, fields => #{}},
+     #{name => <<"Rate Limit">>, description => <<"Rate limiting counter">>,
+       key_pattern => <<"ratelimit:{ip}:{endpoint}">>, type => <<"string">>,
+       default_ttl => 60, default_value => <<"0">>, fields => #{}},
+     #{name => <<"Queue">>, description => <<"Job queue">>,
+       key_pattern => <<"queue:{name}">>, type => <<"list">>,
+       default_ttl => 0, default_value => <<>>, fields => #{}},
+     #{name => <<"Leaderboard">>, description => <<"Sorted leaderboard">>,
+       key_pattern => <<"leaderboard:{game}">>, type => <<"zset">>,
+       default_ttl => 0, default_value => <<>>, fields => #{}}].
 
 %% @doc Removes secrets from a config map before persistence.
 -spec strip_secrets(map()) -> map().
@@ -173,6 +204,116 @@ next_id(Conns) ->
     Max + 1.
 
 %% ---------------------------------------------------------------------------
+%% Favorites / recent keys / templates
+%% ---------------------------------------------------------------------------
+
+%% @doc Lists favorites for a connection, newest first.
+-spec list_favorites(string(), integer()) -> {ok, [map()]} | {error, term()}.
+list_favorites(Path, ConnId) ->
+    with_config(Path, fun(Config) ->
+        Favs = [F || F <- maps:get(favorites, Config, []),
+                     maps:get(connection_id, F, 0) =:= ConnId],
+        {ok, lists:sort(fun(A, B) ->
+                            maps:get(added_at, A, <<>>) >= maps:get(added_at, B, <<>>)
+                        end, Favs)}
+    end).
+
+%% @doc Adds a favorite (idempotent).
+-spec add_favorite(string(), integer(), binary(), binary()) ->
+    {ok, map()} | {error, term()}.
+add_favorite(Path, ConnId, Key, Label) ->
+    with_config(Path, fun(Config) ->
+        Favs = maps:get(favorites, Config, []),
+        case [F || F <- Favs,
+                   maps:get(connection_id, F, 0) =:= ConnId,
+                   maps:get(key, F, undefined) =:= Key] of
+            [Existing | _] ->
+                {ok, Existing};
+            [] ->
+                Fav = #{connection_id => ConnId, key => Key, label => Label,
+                        added_at => now_iso8601()},
+                case save(Path, Config#{favorites => Favs ++ [Fav]}) of
+                    ok -> {ok, Fav};
+                    {error, _} = Error -> Error
+                end
+        end
+    end).
+
+%% @doc Removes a favorite.
+-spec remove_favorite(string(), integer(), binary()) -> ok | {error, term()}.
+remove_favorite(Path, ConnId, Key) ->
+    with_config(Path, fun(Config) ->
+        Favs = maps:get(favorites, Config, []),
+        New = [F || F <- Favs,
+                    not (maps:get(connection_id, F, 0) =:= ConnId
+                         andalso maps:get(key, F, undefined) =:= Key)],
+        save(Path, Config#{favorites => New})
+    end).
+
+%% @doc True if a key is favorited for the connection.
+-spec is_favorite(string(), integer(), binary()) -> boolean().
+is_favorite(Path, ConnId, Key) ->
+    case list_favorites(Path, ConnId) of
+        {ok, Favs} -> lists:any(fun(F) -> maps:get(key, F, undefined) =:= Key end, Favs);
+        _ -> false
+    end.
+
+%% @doc Lists recent keys for a connection (newest first).
+-spec list_recent(string(), integer()) -> {ok, [map()]} | {error, term()}.
+list_recent(Path, ConnId) ->
+    with_config(Path, fun(Config) ->
+        Recent = [R || R <- maps:get(recent_keys, Config, []),
+                       maps:get(connection_id, R, 0) =:= ConnId],
+        {ok, Recent}
+    end).
+
+%% @doc Records a recently accessed key (deduplicated, trimmed).
+-spec add_recent(string(), integer(), binary(), binary()) -> ok | {error, term()}.
+add_recent(Path, ConnId, Key, Type) ->
+    with_config(Path, fun(Config) ->
+        Recent = maps:get(recent_keys, Config, []),
+        Without = [R || R <- Recent,
+                        not (maps:get(connection_id, R, 0) =:= ConnId
+                             andalso maps:get(key, R, undefined) =:= Key)],
+        Entry = #{connection_id => ConnId, key => Key, type => Type,
+                  accessed_at => now_iso8601()},
+        Max = maps:get(max_recent_keys, Config, 20),
+        New = lists:sublist([Entry | Without], Max),
+        save(Path, Config#{recent_keys => New})
+    end).
+
+%% @doc Clears recent keys for a connection.
+-spec clear_recent(string(), integer()) -> ok | {error, term()}.
+clear_recent(Path, ConnId) ->
+    with_config(Path, fun(Config) ->
+        Recent = maps:get(recent_keys, Config, []),
+        New = [R || R <- Recent, maps:get(connection_id, R, 0) =/= ConnId],
+        save(Path, Config#{recent_keys => New})
+    end).
+
+%% @doc Lists key templates.
+-spec list_templates(string()) -> {ok, [map()]} | {error, term()}.
+list_templates(Path) ->
+    with_config(Path, fun(Config) -> {ok, maps:get(templates, Config, [])} end).
+
+%% @doc Adds a key template.
+-spec add_template(string(), map()) -> ok | {error, term()}.
+add_template(Path, Template) ->
+    with_config(Path, fun(Config) ->
+        Templates = maps:get(templates, Config, []),
+        save(Path, Config#{templates => Templates ++ [Template]})
+    end).
+
+%% @doc Deletes a key template by name.
+-spec delete_template(string(), binary()) -> ok | {error, term()}.
+delete_template(Path, Name) ->
+    with_config(Path, fun(Config) ->
+        Templates = maps:get(templates, Config, []),
+        New = [T || T <- Templates, maps:get(name, T, undefined) =/= Name],
+        save(Path, Config#{templates => New})
+    end).
+
+%% ---------------------------------------------------------------------------
 %% Internal
 %% ---------------------------------------------------------------------------
 
@@ -187,9 +328,9 @@ normalize(Data) when is_map(Data) ->
     D = defaults(),
     D#{connections => [normalize_connection(C)
                         || C <- list_value(<<"connections">>, Data, [])],
-       favorites => list_value(<<"favorites">>, Data, []),
-       recent_keys => list_value(<<"recent_keys">>, Data, []),
-       templates => list_value(<<"templates">>, Data, []),
+       favorites => [normalize_favorite(F) || F <- list_value(<<"favorites">>, Data, [])],
+       recent_keys => [normalize_recent(R) || R <- list_value(<<"recent_keys">>, Data, [])],
+       templates => normalize_templates(value(<<"templates">>, Data, undefined)),
        tree_separator => value(<<"tree_separator">>, Data, <<":">>),
        max_recent_keys => value(<<"max_recent_keys">>, Data, 20),
        max_value_history => value(<<"max_value_history">>, Data, 50),
@@ -215,6 +356,42 @@ normalize_connection(C) when is_map(C) ->
       created_at => value(<<"created_at">>, C, undefined),
       updated_at => value(<<"updated_at">>, C, undefined)};
 normalize_connection(_C) ->
+    #{}.
+
+-spec normalize_templates(term()) -> [map()].
+normalize_templates(undefined) -> default_templates();
+normalize_templates(List) when is_list(List) -> [normalize_template(T) || T <- List];
+normalize_templates(_Other) -> default_templates().
+
+-spec normalize_favorite(term()) -> map().
+normalize_favorite(F) when is_map(F) ->
+    #{connection_id => value(<<"connection_id">>, F, 0),
+      connection => value(<<"connection">>, F, <<>>),
+      key => value(<<"key">>, F, <<>>),
+      label => value(<<"label">>, F, <<>>),
+      added_at => value(<<"added_at">>, F, <<>>)};
+normalize_favorite(_F) ->
+    #{}.
+
+-spec normalize_recent(term()) -> map().
+normalize_recent(R) when is_map(R) ->
+    #{connection_id => value(<<"connection_id">>, R, 0),
+      key => value(<<"key">>, R, <<>>),
+      type => value(<<"type">>, R, <<"string">>),
+      accessed_at => value(<<"accessed_at">>, R, <<>>)};
+normalize_recent(_R) ->
+    #{}.
+
+-spec normalize_template(term()) -> map().
+normalize_template(T) when is_map(T) ->
+    #{name => value(<<"name">>, T, <<>>),
+      description => value(<<"description">>, T, <<>>),
+      key_pattern => value(<<"key_pattern">>, T, value(<<"pattern">>, T, <<>>)),
+      type => value(<<"type">>, T, value(<<"key_type">>, T, <<"string">>)),
+      default_ttl => value(<<"default_ttl">>, T, 0),
+      default_value => value(<<"default_value">>, T, <<>>),
+      fields => value(<<"fields">>, T, #{})};
+normalize_template(_T) ->
     #{}.
 
 %% Reads a value by binary key, falling back to the atom key (in-code configs).

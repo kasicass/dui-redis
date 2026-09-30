@@ -132,3 +132,41 @@ mk_tmp() ->
 cleanup(Dir) ->
     _ = file:del_dir_r(Dir),
     ok.
+
+favorites_crud_test() ->
+    Dir = mk_tmp(),
+    Path = filename:join(Dir, "config.json"),
+    ?assertEqual({ok, []}, dui_redis_config:list_favorites(Path, 1)),
+    {ok, Fav} = dui_redis_config:add_favorite(Path, 1, <<"k">>, <<"Label">>),
+    ?assertEqual(<<"k">>, maps:get(key, Fav)),
+    {ok, Favs} = dui_redis_config:list_favorites(Path, 1),
+    ?assertEqual(1, length(Favs)),
+    ?assert(dui_redis_config:is_favorite(Path, 1, <<"k">>)),
+    %% idempotent
+    {ok, _} = dui_redis_config:add_favorite(Path, 1, <<"k">>, <<"Label">>),
+    {ok, Favs1} = dui_redis_config:list_favorites(Path, 1),
+    ?assertEqual(1, length(Favs1)),
+    ok = dui_redis_config:remove_favorite(Path, 1, <<"k">>),
+    ?assertNot(dui_redis_config:is_favorite(Path, 1, <<"k">>)),
+    cleanup(Dir).
+
+recent_keys_test() ->
+    Dir = mk_tmp(),
+    Path = filename:join(Dir, "config.json"),
+    ok = dui_redis_config:add_recent(Path, 1, <<"a">>, <<"string">>),
+    ok = dui_redis_config:add_recent(Path, 1, <<"b">>, <<"list">>),
+    ok = dui_redis_config:add_recent(Path, 1, <<"a">>, <<"string">>),
+    {ok, Recent} = dui_redis_config:list_recent(Path, 1),
+    ?assertEqual([<<"a">>, <<"b">>], [maps:get(key, R) || R <- Recent]),
+    ok = dui_redis_config:clear_recent(Path, 1),
+    ?assertEqual({ok, []}, dui_redis_config:list_recent(Path, 1)),
+    cleanup(Dir).
+
+default_templates_test() ->
+    Dir = mk_tmp(),
+    Path = filename:join(Dir, "config.json"),
+    {ok, Templates} = dui_redis_config:list_templates(Path),
+    ?assert(length(Templates) >= 5),
+    Names = [maps:get(name, T) || T <- Templates],
+    ?assert(lists:member(<<"Session">>, Names)),
+    cleanup(Dir).

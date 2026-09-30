@@ -72,6 +72,20 @@
     set_prompt_purpose/2,
     history/1,
     set_history/2,
+    results/1,
+    set_results/3,
+    selected_result/1,
+    set_selected_result/2,
+    results_title/1,
+    results_purpose/1,
+    tree_nodes/1,
+    set_tree_nodes/2,
+    tree_expanded/1,
+    toggle_tree_expanded/2,
+    selected_tree/1,
+    set_selected_tree/2,
+    result_text/1,
+    set_result_text/2,
     status/1,
     show_help/1,
     config_path/1,
@@ -332,6 +346,55 @@ history(#dui_state{history = H}) -> H.
 
 -spec set_history(#dui_state{}, dui_redis_history:history()) -> #dui_state{}.
 set_history(State, Hist) -> State#dui_state{history = Hist}.
+
+-spec results(#dui_state{}) -> [map()].
+results(#dui_state{results = R}) -> R.
+
+-spec set_results(#dui_state{}, [map()], {binary(), atom()}) -> #dui_state{}.
+set_results(State, Results, {Title, Purpose}) ->
+    State#dui_state{results = Results, selected_result = 0,
+                    results_title = Title, results_purpose = Purpose}.
+
+-spec selected_result(#dui_state{}) -> non_neg_integer().
+selected_result(#dui_state{selected_result = N}) -> N.
+
+-spec set_selected_result(#dui_state{}, non_neg_integer()) -> #dui_state{}.
+set_selected_result(State, N) -> State#dui_state{selected_result = max(0, N)}.
+
+-spec results_title(#dui_state{}) -> binary().
+results_title(#dui_state{results_title = T}) -> T.
+
+-spec results_purpose(#dui_state{}) -> atom() | undefined.
+results_purpose(#dui_state{results_purpose = P}) -> P.
+
+-spec tree_nodes(#dui_state{}) -> [map()].
+tree_nodes(#dui_state{tree_nodes = N}) -> N.
+
+-spec set_tree_nodes(#dui_state{}, [map()]) -> #dui_state{}.
+set_tree_nodes(State, Nodes) -> State#dui_state{tree_nodes = Nodes, selected_tree = 0}.
+
+-spec tree_expanded(#dui_state{}) -> [binary()].
+tree_expanded(#dui_state{tree_expanded = E}) -> E.
+
+-spec toggle_tree_expanded(#dui_state{}, binary()) -> #dui_state{}.
+toggle_tree_expanded(#dui_state{tree_expanded = Expanded} = State, Path) ->
+    New = case lists:member(Path, Expanded) of
+        true -> lists:delete(Path, Expanded);
+        false -> [Path | Expanded]
+    end,
+    State#dui_state{tree_expanded = New}.
+
+-spec selected_tree(#dui_state{}) -> non_neg_integer().
+selected_tree(#dui_state{selected_tree = N}) -> N.
+
+-spec set_selected_tree(#dui_state{}, non_neg_integer()) -> #dui_state{}.
+set_selected_tree(State, N) -> State#dui_state{selected_tree = max(0, N)}.
+
+-spec result_text(#dui_state{}) -> binary() | undefined.
+result_text(#dui_state{result_text = T}) -> T.
+
+-spec set_result_text(#dui_state{}, binary() | undefined) -> #dui_state{}.
+set_result_text(State, Text) -> State#dui_state{result_text = Text}.
 
 -spec status(#dui_state{}) -> {info | error, binary()} | undefined.
 status(#dui_state{status = Status}) -> Status.

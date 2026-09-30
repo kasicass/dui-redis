@@ -182,6 +182,55 @@ update({collection_removed, {ok, _}}, State) ->
     refresh_detail(S1);
 update({collection_removed, {error, Reason}}, State) ->
     {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({favorites_loaded, {ok, Favs}}, State) ->
+    S1 = dui_redis_state:set_results(State, Favs, {<<"Favorites">>, favorites}),
+    {dui_redis_state:set_screen(S1, results), []};
+update({favorites_loaded, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({favorite_added, _Key, {ok, _}}, State) ->
+    {dui_redis_state:set_status(State, info, <<"Added to favorites">>), []};
+update({favorite_added, _Key, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({favorite_removed, _Key, ok}, State) ->
+    case dui_redis_state:results_purpose(State) of
+        favorites -> start_favorites(State);
+        _ -> {State, []}
+    end;
+update({favorite_removed, _Key, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({recent_loaded, {ok, Recent}}, State) ->
+    S1 = dui_redis_state:set_results(State, Recent, {<<"Recent Keys">>, recent}),
+    {dui_redis_state:set_screen(S1, results), []};
+update({recent_loaded, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({recent_added, _Result}, State) ->
+    {State, []};
+update({recent_cleared, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({recent_cleared, _}, State) ->
+    S1 = dui_redis_state:set_results(State, [], {<<"Recent Keys">>, recent}),
+    {dui_redis_state:set_status(S1, info, <<"Recent keys cleared">>), []};
+update({templates_loaded, {ok, Templates}}, State) ->
+    S1 = dui_redis_state:set_results(State, Templates, {<<"Templates">>, templates}),
+    {dui_redis_state:set_screen(S1, results), []};
+update({templates_loaded, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({search_results, {Title, Purpose}, {ok, Keys}}, State) ->
+    S1 = dui_redis_state:set_results(State, Keys, {Title, Purpose}),
+    {dui_redis_state:set_screen(S1, results), []};
+update({search_results, _Info, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({compare_result, {ok, {V1, V2, Diff}}}, State) ->
+    Text = build_compare_text(V1, V2, Diff),
+    S1 = dui_redis_state:set_result_text(State, Text),
+    {dui_redis_state:set_screen(S1, result_text), []};
+update({compare_result, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({json_result, {ok, Value}}, State) ->
+    S1 = dui_redis_state:set_result_text(State, to_bin(Value)),
+    {dui_redis_state:set_screen(S1, result_text), []};
+update({json_result, {error, Reason}}, State) ->
+    {dui_redis_state:set_status(State, error, error_text(Reason)), []};
 update({key, Key, Mods}, State) ->
     handle_event(Key, Mods, State);
 update(_Msg, State) ->
@@ -249,6 +298,12 @@ handle_escape(#dui_state{filter_active = true} = State) ->
     {dui_redis_state:set_filter_edit(S1, undefined), []};
 handle_escape(#dui_state{screen = key_detail} = State) ->
     {dui_redis_state:set_screen(State, keys), []};
+handle_escape(#dui_state{screen = results} = State) ->
+    {dui_redis_state:set_screen(State, keys), []};
+handle_escape(#dui_state{screen = tree} = State) ->
+    {dui_redis_state:set_screen(State, keys), []};
+handle_escape(#dui_state{screen = result_text} = State) ->
+    {dui_redis_state:set_screen(State, keys), []};
 handle_escape(#dui_state{screen = edit_value} = State) ->
     {dui_redis_state:set_screen(State, key_detail), []};
 handle_escape(#dui_state{screen = prompt} = State) ->
@@ -286,6 +341,12 @@ screen_key(#dui_state{screen = edit_value} = State, Key, Mods) ->
     editor_key(State, Key, Mods);
 screen_key(#dui_state{screen = prompt} = State, Key, Mods) ->
     prompt_key(State, Key, Mods);
+screen_key(#dui_state{screen = results} = State, Key, Mods) ->
+    results_key(State, Key, Mods);
+screen_key(#dui_state{screen = tree} = State, Key, Mods) ->
+    tree_key(State, Key, Mods);
+screen_key(#dui_state{screen = result_text} = State, _Key, _Mods) ->
+    {State, []};
 screen_key(#dui_state{screen = switch_db} = State, Key, _Mods) ->
     switch_db_key(State, Key);
 screen_key(State, _Key, _Mods) ->
@@ -477,7 +538,7 @@ keys_nav_key(State, <<"d">>, Mods) ->
 keys_nav_key(State, <<"u">>, Mods) ->
     case lists:member(ctrl, Mods) of
         true -> move_key(State, -10);
-        false -> {State, []}
+        false -> start_history(State)
     end;
 keys_nav_key(State, Key, _Mods) when Key =:= home; Key =:= <<"g">> ->
     select_key(State, 0);
@@ -494,10 +555,28 @@ keys_nav_key(State, <<"S">>, _Mods) ->
     toggle_sort(State);
 keys_nav_key(State, <<"l">>, _Mods) ->
     load_more_keys(State);
-keys_nav_key(State, <<"r">>, _Mods) ->
-    reload_keys(State);
-keys_nav_key(State, <<"f">>, _Mods) ->
-    confirm_flush_db(State);
+keys_nav_key(State, <<"r">>, Mods) ->
+    case lists:member(ctrl, Mods) of
+        true -> start_prompt(State, regex);
+        false -> reload_keys(State)
+    end;
+keys_nav_key(State, <<"f">>, Mods) ->
+    case lists:member(ctrl, Mods) of
+        true -> start_prompt(State, fuzzy);
+        false -> confirm_flush_db(State)
+    end;
+keys_nav_key(State, <<"v">>, _Mods) ->
+    start_prompt(State, search_value);
+keys_nav_key(State, <<"F">>, _Mods) ->
+    start_favorites(State);
+keys_nav_key(State, <<"H">>, _Mods) ->
+    start_recent(State);
+keys_nav_key(State, <<"W">>, _Mods) ->
+    start_tree(State);
+keys_nav_key(State, <<"P">>, _Mods) ->
+    start_templates(State);
+keys_nav_key(State, <<"=">>, _Mods) ->
+    start_prompt(State, compare);
 keys_nav_key(State, <<"D">>, _Mods) ->
     start_switch_db(State);
 keys_nav_key(State, _Key, _Mods) ->
@@ -753,7 +832,7 @@ detail_key(State, Key, Mods) ->
         page_down -> scroll_detail(State, 20);
         page_up -> scroll_detail(State, -20);
         <<"d">> -> maybe_ctrl_scroll(State, Mods, 20, confirm_delete_key(State));
-        <<"u">> -> maybe_ctrl_scroll(State, Mods, -20, {State, []});
+        <<"u">> -> maybe_ctrl_scroll(State, Mods, -20, start_history_for_current(State));
         <<"r">> -> refresh_detail(State);
         <<"e">> -> start_edit(State);
         <<"t">> -> start_prompt(State, ttl);
@@ -761,6 +840,8 @@ detail_key(State, Key, Mods) ->
         <<"c">> -> start_prompt(State, copy);
         <<"a">> -> start_prompt(State, collection_add);
         <<"x">> -> start_prompt(State, collection_remove);
+        <<"J">> -> start_prompt(State, json_path);
+        <<"F">> -> add_current_favorite(State);
         delete -> confirm_delete_key(State);
         backspace -> confirm_delete_key(State);
         _ -> {State, []}
@@ -878,6 +959,25 @@ start_prompt(State, ttl) ->
     Prompt = dui_redis_prompt:new([{ttl, <<"TTL seconds (-1 to remove)">>, false}],
                                   #{ttl => <<>>}),
     open_prompt(State, Prompt, {ttl, KeyMap});
+start_prompt(State, regex) ->
+    Prompt = dui_redis_prompt:new([{pattern, <<"Regex">>, false}]),
+    open_prompt(State, Prompt, {regex, undefined});
+start_prompt(State, fuzzy) ->
+    Prompt = dui_redis_prompt:new([{term, <<"Fuzzy term">>, false}]),
+    open_prompt(State, Prompt, {fuzzy, undefined});
+start_prompt(State, search_value) ->
+    Prompt = dui_redis_prompt:new([{pattern, <<"Key pattern">>, false},
+                                   {search, <<"Value contains">>, false}]),
+    open_prompt(State, Prompt, {search_value, undefined});
+start_prompt(State, compare) ->
+    Prompt = dui_redis_prompt:new([{k1, <<"First key">>, false},
+                                   {k2, <<"Second key">>, false}]),
+    open_prompt(State, Prompt, {compare, undefined});
+start_prompt(State, json_path) ->
+    KeyMap = dui_redis_state:current_key(State),
+    Prompt = dui_redis_prompt:new([{path, <<"JSONPath (e.g. $.name)">>, false}],
+                                  #{path => <<"$">>}),
+    open_prompt(State, Prompt, {json_path, KeyMap});
 start_prompt(State, Action) when Action =:= collection_add;
                                  Action =:= collection_remove ->
     KeyMap = dui_redis_state:current_key(State),
@@ -952,33 +1052,51 @@ submit_prompt(State) ->
     Purpose = dui_redis_state:prompt_purpose(State),
     Prompt = dui_redis_state:prompt(State),
     Values = dui_redis_prompt:to_map(Prompt),
-    {Tag, Fun} = prompt_command(Purpose, Values),
+    {Screen, Commands} = prompt_action(Purpose, Values),
     S1 = dui_redis_state:set_prompt(State, undefined),
-    S2 = dui_redis_state:set_screen(S1, key_detail),
-    {S2, [dui_redis_cmd:write(Tag, Fun)]}.
+    S2 = dui_redis_state:set_screen(S1, Screen),
+    {S2, Commands}.
 
--spec prompt_command(term(), map()) -> {atom(), fun(() -> term())}.
-prompt_command({rename, KeyMap}, Values) ->
+-spec prompt_action(term(), map()) -> {atom(), [educkui_command:command()]}.
+prompt_action({rename, KeyMap}, Values) ->
     Old = maps:get(key, KeyMap),
     New = maps:get(name, Values, <<>>),
-    {key_renamed, fun() -> dui_redis_client:rename_key(Old, New) end};
-prompt_command({copy, KeyMap}, Values) ->
+    {key_detail, [dui_redis_cmd:write(key_renamed,
+        fun() -> dui_redis_client:rename_key(Old, New) end)]};
+prompt_action({copy, KeyMap}, Values) ->
     Src = maps:get(key, KeyMap),
     Dst = maps:get(name, Values, <<>>),
-    {key_copied, fun() -> dui_redis_client:copy_key(Src, Dst, false) end};
-prompt_command({ttl, KeyMap}, Values) ->
+    {key_detail, [dui_redis_cmd:write(key_copied,
+        fun() -> dui_redis_client:copy_key(Src, Dst, false) end)]};
+prompt_action({ttl, KeyMap}, Values) ->
     Key = maps:get(key, KeyMap),
     Seconds = case parse_int(maps:get(ttl, Values, <<>>)) of
         {ok, N} -> N;
         error -> 0
     end,
-    {ttl_set, fun() -> dui_redis_client:set_ttl(Key, Seconds) end};
-prompt_command({collection_add, KeyMap, Type}, Values) ->
+    {key_detail, [dui_redis_cmd:write(ttl_set,
+        fun() -> dui_redis_client:set_ttl(Key, Seconds) end)]};
+prompt_action({collection_add, KeyMap, Type}, Values) ->
     Key = maps:get(key, KeyMap),
-    {collection_added, collection_fun(Type, add, Key, Values)};
-prompt_command({collection_remove, KeyMap, Type}, Values) ->
+    {key_detail, [dui_redis_cmd:write(collection_added,
+        collection_fun(Type, add, Key, Values))]};
+prompt_action({collection_remove, KeyMap, Type}, Values) ->
     Key = maps:get(key, KeyMap),
-    {collection_removed, collection_fun(Type, remove, Key, Values)}.
+    {key_detail, [dui_redis_cmd:write(collection_removed,
+        collection_fun(Type, remove, Key, Values))]};
+prompt_action({regex, _}, Values) ->
+    {keys, [dui_redis_cmd:regex_search(maps:get(pattern, Values, <<>>), 100)]};
+prompt_action({fuzzy, _}, Values) ->
+    {keys, [dui_redis_cmd:fuzzy_search(maps:get(term, Values, <<>>), 100)]};
+prompt_action({search_value, _}, Values) ->
+    {keys, [dui_redis_cmd:search_by_value(maps:get(pattern, Values, <<>>),
+                                          maps:get(search, Values, <<>>), 100)]};
+prompt_action({compare, _}, Values) ->
+    {keys, [dui_redis_cmd:compare_keys(maps:get(k1, Values, <<>>),
+                                       maps:get(k2, Values, <<>>))]};
+prompt_action({json_path, KeyMap}, Values) ->
+    Key = maps:get(key, KeyMap),
+    {key_detail, [dui_redis_cmd:json_get_path(Key, maps:get(path, Values, <<>>))]}.
 
 -spec collection_fun(atom(), add | remove, binary(), map()) -> fun(() -> term()).
 collection_fun(list, add, Key, V) ->
@@ -1037,6 +1155,228 @@ collection_fields(hll, _) -> [{element, <<"Element">>, false}];
 collection_fields(bitmap, _) ->
     [{offset, <<"Bit offset">>, false}, {value, <<"Bit (0/1)">>, false}];
 collection_fields(_Type, _Action) -> [{value, <<"Value">>, false}].
+
+%% -- lists / tree (M4) ------------------------------------------------------
+
+-spec start_favorites(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_favorites(State) ->
+    S1 = dui_redis_state:set_loading(State, true),
+    {S1, [dui_redis_cmd:load_favorites(State)]}.
+
+-spec start_recent(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_recent(State) ->
+    S1 = dui_redis_state:set_loading(State, true),
+    {S1, [dui_redis_cmd:load_recent(State)]}.
+
+-spec start_templates(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_templates(State) ->
+    S1 = dui_redis_state:set_loading(State, true),
+    {S1, [dui_redis_cmd:load_templates(State)]}.
+
+-spec start_tree(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_tree(State) ->
+    Keys = [maps:get(key, K, <<>>) || K <- dui_redis_state:keys(State)],
+    Nodes = dui_redis_tree:build(Keys, <<":">>),
+    S1 = dui_redis_state:set_tree_nodes(State, Nodes),
+    {dui_redis_state:set_screen(S1, tree), []}.
+
+-spec start_history(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+start_history(State) ->
+    case selected_key_map(State) of
+        undefined -> {State, []};
+        #{key := Key} -> show_history(State, Key)
+    end.
+
+-spec start_history_for_current(#dui_state{}) ->
+    {#dui_state{}, [educkui_command:command()]}.
+start_history_for_current(State) ->
+    case dui_redis_state:current_key(State) of
+        undefined -> {State, []};
+        KeyMap -> show_history(State, maps:get(key, KeyMap, <<>>))
+    end.
+
+-spec show_history(#dui_state{}, binary()) -> {#dui_state{}, [educkui_command:command()]}.
+show_history(State, Key) ->
+    Entries = dui_redis_history:entries(dui_redis_state:history(State), Key),
+    S1 = dui_redis_state:set_results(State, Entries, {<<"Value History">>, history}),
+    {dui_redis_state:set_screen(S1, results), []}.
+
+-spec add_current_favorite(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+add_current_favorite(State) ->
+    case dui_redis_state:current_key(State) of
+        undefined ->
+            {State, []};
+        KeyMap ->
+            Key = maps:get(key, KeyMap),
+            {State, [dui_redis_cmd:add_favorite(State, Key, <<>>)]}
+    end.
+
+%% -- results screen ---------------------------------------------------------
+
+-spec results_key(#dui_state{}, term(), [atom()]) ->
+    {#dui_state{}, [educkui_command:command()]}.
+results_key(State, Key, Mods) ->
+    case Key of
+        K when K =:= <<"j">>; K =:= down -> move_result(State, 1);
+        K when K =:= <<"k">>; K =:= up -> move_result(State, -1);
+        page_down -> move_result(State, 10);
+        page_up -> move_result(State, -10);
+        K when K =:= home; K =:= <<"g">> -> set_result_index(State, 0);
+        K when K =:= 'end'; K =:= <<"G">> ->
+            set_result_index(State, max(0, length(dui_redis_state:results(State)) - 1));
+        enter -> open_result(State);
+        <<"d">> -> remove_result_item(State, Mods);
+        _ -> {State, []}
+    end.
+
+-spec move_result(#dui_state{}, integer()) -> {#dui_state{}, [educkui_command:command()]}.
+move_result(State, Delta) ->
+    Count = length(dui_redis_state:results(State)),
+    Current = dui_redis_state:selected_result(State),
+    Target = max(0, min(max(0, Count - 1), Current + Delta)),
+    set_result_index(State, Target).
+
+-spec set_result_index(#dui_state{}, non_neg_integer()) ->
+    {#dui_state{}, [educkui_command:command()]}.
+set_result_index(State, Index) ->
+    {dui_redis_state:set_selected_result(State, Index), []}.
+
+-spec open_result(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+open_result(State) ->
+    case selected_result_map(State) of
+        undefined ->
+            {State, []};
+        Entry ->
+            case dui_redis_state:results_purpose(State) of
+                templates ->
+                    Msg = <<"Template ", (to_bin(maps:get(name, Entry, <<>>)))/binary,
+                            ": ", (to_bin(maps:get(key_pattern, Entry, <<>>)))/binary>>,
+                    {dui_redis_state:set_status(State, info, Msg), []};
+                history ->
+                    Value = maps:get(value, Entry, #{}),
+                    Text = join_lines(dui_redis_preview:lines(Value, 200)),
+                    S1 = dui_redis_state:set_result_text(State, Text),
+                    {dui_redis_state:set_screen(S1, result_text), []};
+                _ ->
+                    open_key_detail(State, maps:get(key, Entry, <<>>))
+            end
+    end.
+
+-spec remove_result_item(#dui_state{}, [atom()]) ->
+    {#dui_state{}, [educkui_command:command()]}.
+remove_result_item(State, _Mods) ->
+    case {dui_redis_state:results_purpose(State), selected_result_map(State)} of
+        {favorites, Entry} ->
+            {State, [dui_redis_cmd:remove_favorite(State, maps:get(key, Entry, <<>>))]};
+        _ ->
+            {State, []}
+    end.
+
+-spec selected_result_map(#dui_state{}) -> map() | undefined.
+selected_result_map(State) ->
+    case dui_redis_state:results(State) of
+        [] -> undefined;
+        Results ->
+            Index = min(dui_redis_state:selected_result(State), length(Results) - 1),
+            lists:nth(Index + 1, Results)
+    end.
+
+-spec open_key_detail(#dui_state{}, binary()) ->
+    {#dui_state{}, [educkui_command:command()]}.
+open_key_detail(State, Key) ->
+    KeyMap = find_key_map(State, Key),
+    S1 = dui_redis_state:set_current_key(State, KeyMap),
+    S2 = dui_redis_state:set_current_value(S1, undefined),
+    S3 = dui_redis_state:set_detail_scroll(S2, 0),
+    S4 = dui_redis_state:set_screen(S3, key_detail),
+    Type = to_bin(maps:get(type, KeyMap, string)),
+    {S4, [dui_redis_cmd:load_detail(State, Key),
+          dui_redis_cmd:add_recent(State, Key, Type)]}.
+
+%% -- tree screen ------------------------------------------------------------
+
+-spec tree_key(#dui_state{}, term(), [atom()]) ->
+    {#dui_state{}, [educkui_command:command()]}.
+tree_key(State, Key, _Mods) ->
+    Flat = flattened_tree(State),
+    Count = length(Flat),
+    Sel = min(dui_redis_state:selected_tree(State), max(0, Count - 1)),
+    case Key of
+        K when K =:= <<"j">>; K =:= down ->
+            {dui_redis_state:set_selected_tree(State, min(max(0, Count - 1), Sel + 1)), []};
+        K when K =:= <<"k">>; K =:= up ->
+            {dui_redis_state:set_selected_tree(State, max(0, Sel - 1)), []};
+        right -> tree_toggle(State, Flat, Sel);
+        left -> tree_collapse(State, Flat, Sel);
+        enter -> tree_activate(State, Flat, Sel);
+        _ -> {State, []}
+    end.
+
+-spec flattened_tree(#dui_state{}) -> [{non_neg_integer(), map()}].
+flattened_tree(State) ->
+    dui_redis_tree:flatten(dui_redis_state:tree_nodes(State),
+                           dui_redis_state:tree_expanded(State)).
+
+-spec node_at([{non_neg_integer(), map()}], non_neg_integer()) -> map() | undefined.
+node_at([], _Index) -> undefined;
+node_at(Flat, Index) ->
+    element(2, lists:nth(min(Index + 1, length(Flat)), Flat)).
+
+-spec tree_toggle(#dui_state{}, [{non_neg_integer(), map()}], non_neg_integer()) ->
+    {#dui_state{}, [educkui_command:command()]}.
+tree_toggle(State, Flat, Sel) ->
+    case node_at(Flat, Sel) of
+        #{path := Path} = Node ->
+            case maps:get(children, Node, []) of
+                [] -> {State, []};
+                _ ->
+                    S1 = dui_redis_state:toggle_tree_expanded(State, Path),
+                    {S1, []}
+            end;
+        undefined ->
+            {State, []}
+    end.
+
+-spec tree_collapse(#dui_state{}, [{non_neg_integer(), map()}], non_neg_integer()) ->
+    {#dui_state{}, [educkui_command:command()]}.
+tree_collapse(State, Flat, Sel) ->
+    case node_at(Flat, Sel) of
+        #{path := Path} ->
+            case lists:member(Path, dui_redis_state:tree_expanded(State)) of
+                true -> {dui_redis_state:toggle_tree_expanded(State, Path), []};
+                false -> {State, []}
+            end;
+        undefined ->
+            {State, []}
+    end.
+
+-spec tree_activate(#dui_state{}, [{non_neg_integer(), map()}], non_neg_integer()) ->
+    {#dui_state{}, [educkui_command:command()]}.
+tree_activate(State, Flat, Sel) ->
+    case node_at(Flat, Sel) of
+        undefined ->
+            {State, []};
+        Node ->
+            case maps:get(children, Node, []) of
+                [] ->
+                    case maps:get(is_key, Node, false) of
+                        true -> open_key_detail(State, maps:get(path, Node));
+                        false -> {State, []}
+                    end;
+                _ ->
+                    {dui_redis_state:toggle_tree_expanded(State, maps:get(path, Node)), []}
+            end
+    end.
+
+-spec join_lines([binary()]) -> binary().
+join_lines(Lines) ->
+    iolist_to_binary(lists:join(<<"\n">>, Lines)).
+
+-spec build_compare_text(map(), map(), binary()) -> binary().
+build_compare_text(V1, V2, Diff) ->
+    L1 = join_lines(dui_redis_preview:lines(V1, 200)),
+    L2 = join_lines(dui_redis_preview:lines(V2, 200)),
+    <<"Key 1:\n", L1/binary, "\n\nKey 2:\n", L2/binary, "\n\nDiff:\n", Diff/binary>>.
 
 %% ---------------------------------------------------------------------------
 %% State transitions
@@ -1218,6 +1558,12 @@ screen_view(#dui_state{screen = edit_value} = State) ->
     editor_view(State);
 screen_view(#dui_state{screen = prompt} = State) ->
     prompt_view(State);
+screen_view(#dui_state{screen = results} = State) ->
+    results_view(State);
+screen_view(#dui_state{screen = tree} = State) ->
+    tree_view(State);
+screen_view(#dui_state{screen = result_text} = State) ->
+    result_text_view(State);
 screen_view(#dui_state{screen = switch_db} = State) ->
     switch_db_view(State);
 screen_view(_State) ->
@@ -1490,6 +1836,131 @@ prompt_field_nodes({Id, Label, Masked}, Index, Focus, Prompt) ->
     [educkui_render_node:text(<<Prefix/binary, Label/binary, ":">>, Style),
      educkui_render_node:height(
         educkui_render_node:text(<<"    ", Display/binary>>, ValueStyle), 1)].
+
+%% -- results / tree / result text -------------------------------------------
+
+-spec results_view(#dui_state{}) -> #dui_node{}.
+results_view(State) ->
+    Title = dui_redis_state:results_title(State),
+    Purpose = dui_redis_state:results_purpose(State),
+    Results = dui_redis_state:results(State),
+    Count = length(Results),
+    Selected = min(dui_redis_state:selected_result(State), max(0, Count - 1)),
+    {Rows, _} = dui_redis_state:size(State),
+    Visible = max(1, Rows - 5),
+    {Offset, _} = educkui_widget_list:visible_range(Count, Selected, Visible),
+    Window = lists:sublist(Results, Offset + 1, Visible),
+    Lines = [result_line(Purpose, R) || R <- Window],
+    Header = iolist_to_binary(io_lib:format(" ~s  (~b)", [Title, Count])),
+    Body = case Lines of
+        [] ->
+            educkui_render_node:height(
+                educkui_render_node:text(<<"  (none)">>, dui_redis_theme:dim()), Visible);
+        _ ->
+            educkui_render_node:height(
+                educkui_render_node:widget(educkui_widget_list, #{
+                    items => Lines,
+                    selected => Selected - Offset,
+                    offset => 0,
+                    style => educkui_style:new(),
+                    selected_style => dui_redis_theme:selected()
+                }), Visible)
+    end,
+    educkui_render_node:stack(vertical, [
+        educkui_render_node:text(Header, dui_redis_theme:subtitle()),
+        Body,
+        footer(<<" j/k nav   enter open   d remove   esc back">>)
+    ]).
+
+-spec result_line(atom() | undefined, map()) -> binary().
+result_line(favorites, Entry) ->
+    Label = to_bin(maps:get(label, Entry, <<>>)),
+    Key = to_bin(maps:get(key, Entry, <<>>)),
+    case Label of
+        <<>> -> Key;
+        _ -> <<Label/binary, "  ", Key/binary>>
+    end;
+result_line(recent, Entry) ->
+    <<(to_bin(maps:get(key, Entry, <<>>)))/binary, "  [",
+      (to_bin(maps:get(type, Entry, <<>>)))/binary, "]">>;
+result_line(templates, Entry) ->
+    <<(to_bin(maps:get(name, Entry, <<>>)))/binary, "  ",
+      (to_bin(maps:get(key_pattern, Entry, <<>>)))/binary, "  ",
+      (to_bin(maps:get(description, Entry, <<>>)))/binary>>;
+result_line(history, Entry) ->
+    Action = to_bin(maps:get(action, Entry, <<>>)),
+    Key = to_bin(maps:get(key, Entry, <<>>)),
+    <<Action/binary, "  ", Key/binary>>;
+result_line(_Purpose, Entry) ->
+    <<(to_bin(maps:get(key, Entry, <<>>)))/binary, "  [",
+      (to_bin(maps:get(type, Entry, <<>>)))/binary, "]">>.
+
+-spec tree_view(#dui_state{}) -> #dui_node{}.
+tree_view(State) ->
+    Flat = flattened_tree(State),
+    Count = length(Flat),
+    Selected = min(dui_redis_state:selected_tree(State), max(0, Count - 1)),
+    Expanded = dui_redis_state:tree_expanded(State),
+    {Rows, _} = dui_redis_state:size(State),
+    Visible = max(1, Rows - 5),
+    {Offset, _} = educkui_widget_list:visible_range(Count, Selected, Visible),
+    Window = lists:sublist(Flat, Offset + 1, Visible),
+    Lines = [tree_line(Depth, Node, Expanded) || {Depth, Node} <- Window],
+    Body = case Lines of
+        [] ->
+            educkui_render_node:height(
+                educkui_render_node:text(<<"  (no keys loaded)">>, dui_redis_theme:dim()), Visible);
+        _ ->
+            educkui_render_node:height(
+                educkui_render_node:widget(educkui_widget_list, #{
+                    items => Lines,
+                    selected => Selected - Offset,
+                    offset => 0,
+                    style => educkui_style:new(),
+                    selected_style => dui_redis_theme:selected()
+                }), Visible)
+    end,
+    educkui_render_node:stack(vertical, [
+        educkui_render_node:text(<<" Tree">>, dui_redis_theme:subtitle()),
+        Body,
+        footer(<<" j/k nav   enter/right expand   left collapse   esc back">>)
+    ]).
+
+-spec tree_line(non_neg_integer(), map(), [binary()]) -> binary().
+tree_line(Depth, Node, Expanded) ->
+    Indent = binary:copy(<<"  ">>, Depth),
+    Children = maps:get(children, Node, []),
+    Path = maps:get(path, Node),
+    Marker = case Children of
+        [] -> <<"  ">>;
+        _ ->
+            case lists:member(Path, Expanded) of
+                true -> <<"- ">>;
+                false -> <<"+ ">>
+            end
+    end,
+    Name = to_bin(maps:get(name, Node, <<>>)),
+    case maps:get(is_key, Node, false) andalso Children =:= [] of
+        true -> <<Indent/binary, Marker/binary, Name/binary>>;
+        false -> <<Indent/binary, Marker/binary, Name/binary, "/">>
+    end.
+
+-spec result_text_view(#dui_state{}) -> #dui_node{}.
+result_text_view(State) ->
+    Text = case dui_redis_state:result_text(State) of
+        undefined -> <<>>;
+        T -> T
+    end,
+    Lines = binary:split(Text, <<"\n">>, [global]),
+    {Rows, _} = dui_redis_state:size(State),
+    Visible = max(1, Rows - 4),
+    Window = lists:sublist(Lines, Visible),
+    educkui_render_node:stack(vertical, [
+        educkui_render_node:text(<<" Result">>, dui_redis_theme:subtitle()),
+        educkui_render_node:text(<<>>)
+        | [educkui_render_node:text(<<"  ", L/binary>>) || L <- Window] ++
+          [footer(<<" esc back">>)]
+    ]).
 
 %% -- confirm delete ---------------------------------------------------------
 

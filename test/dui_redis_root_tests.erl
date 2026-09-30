@@ -212,6 +212,56 @@ live_key_detail() ->
     _ = application:stop(dui_redis),
     ok.
 
+live_favorites_and_tree_test_() ->
+    case redis_available() of
+        true -> {timeout, 40, fun live_favorites_and_tree/0};
+        false -> []
+    end.
+
+live_favorites_and_tree() ->
+    stop_client(),
+    {ok, _} = application:ensure_all_started(dui_redis),
+    seed_keys(),
+    Dir = mk_tmp(),
+    Path = filename:join(Dir, "config.json"),
+    save_conn(Path, <<"Local">>, <<"localhost">>, 6379),
+    Pid = educkui_test:start(#{root => dui_redis_root, size => {24, 120},
+                               init_args => [{opts, #{config_path => Path}}]}),
+    ok = educkui_test:send_event(Pid, educkui_event:resize(120, 24)),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 300)),
+    ok = educkui_test:send_key(Pid, enter),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> length(S#dui_state.keys) >= 3 end, 200)),
+    %% tree view
+    ok = educkui_test:send_key(Pid, <<"W">>),
+    ?assertEqual(ok, educkui_test:sync(Pid)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Tree">>)),
+    ok = educkui_test:send_key(Pid, esc),
+    %% favorite the first key from its detail
+    ok = educkui_test:send_key(Pid, enter),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.current_value =/= undefined end, 100)),
+    ok = educkui_test:send_key(Pid, <<"F">>),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) ->
+            case S#dui_state.status of
+                {info, <<"Added to favorites">>} -> true;
+                _ -> false
+            end
+        end, 100)),
+    ok = educkui_test:send_key(Pid, esc),
+    ok = educkui_test:send_key(Pid, <<"F">>),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) ->
+            S#dui_state.results_purpose =:= favorites
+            andalso length(S#dui_state.results) >= 1
+        end, 150)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Favorites">>)),
+    cleanup(Pid, Dir),
+    _ = application:stop(dui_redis),
+    ok.
+
 start_root() ->
     Dir = mk_tmp(),
     Path = filename:join(Dir, "config.json"),

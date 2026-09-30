@@ -20,6 +20,9 @@ screen_name(keys) -> <<"Keys">>;
 screen_name(key_detail) -> <<"Key Detail">>;
 screen_name(edit_value) -> <<"Edit Value">>;
 screen_name(prompt) -> <<"Input">>;
+screen_name(results) -> <<"Results">>;
+screen_name(tree) -> <<"Tree View">>;
+screen_name(result_text) -> <<"Result">>;
 screen_name(switch_db) -> <<"Switch Database">>;
 screen_name(help) -> <<"Help">>;
 screen_name(Other) -> atom_to_binary(Other, utf8).

@@ -21,6 +21,7 @@
     set_add/2, set_remove/2, zset_add/3, zset_remove/2,
     hash_set/3, hash_delete/2, stream_add/2, stream_delete/2,
     json_set/2, memory_usage/1, key_ttl/1,
+    scan_regex/2, fuzzy_search/2, search_by_value/3, compare_keys/2, json_get_path/2,
     build_options/1, stop/0
 ]).
 
@@ -172,6 +173,27 @@ memory_usage(Key) -> q([<<"MEMORY">>, <<"USAGE">>, Key]).
 -spec key_ttl(binary()) -> {ok, term()} | {error, term()}.
 key_ttl(Key) -> q([<<"TTL">>, Key]).
 
+%% @doc Returns keys matching a regex (bounded to `Max').
+-spec scan_regex(binary(), pos_integer()) -> {ok, [map()]} | {error, term()}.
+scan_regex(Pattern, Max) -> call({scan_regex, Pattern, Max}, ?SCAN_TIMEOUT).
+
+%% @doc Returns the top `Max' keys by fuzzy score against `Term'.
+-spec fuzzy_search(binary(), pos_integer()) -> {ok, [map()]} | {error, term()}.
+fuzzy_search(Term, Max) -> call({fuzzy_search, Term, Max}, ?SCAN_TIMEOUT).
+
+%% @doc Returns keys whose bounded value contains `ValueSearch'.
+-spec search_by_value(binary(), binary(), pos_integer()) -> {ok, [map()]} | {error, term()}.
+search_by_value(Pattern, ValueSearch, Max) ->
+    call({search_by_value, Pattern, ValueSearch, Max}, ?SCAN_TIMEOUT).
+
+%% @doc Returns `{Key1Value, Key2Value, Diff}' for two keys.
+-spec compare_keys(binary(), binary()) -> {ok, {map(), map(), binary()}} | {error, term()}.
+compare_keys(Key1, Key2) -> call({compare_keys, Key1, Key2}, ?SCAN_TIMEOUT).
+
+%% @doc Runs JSON.GET with an explicit path.
+-spec json_get_path(binary(), binary()) -> {ok, term()} | {error, term()}.
+json_get_path(Key, Path) -> q([<<"JSON.GET">>, Key, Path]).
+
 -spec stop() -> ok.
 stop() -> gen_server:stop(?SERVER).
 
@@ -235,6 +257,14 @@ handle_call({value_detail, Key}, _From, State) ->
     {reply, with_conn(State, fun(Pid) -> do_value_detail(Pid, Key) end), State};
 handle_call(db_size, _From, State) ->
     {reply, with_conn(State, fun do_db_size/1), State};
+handle_call({scan_regex, Pattern, Max}, _From, State) ->
+    {reply, with_conn(State, fun(Pid) -> do_scan_regex(Pid, Pattern, Max) end), State};
+handle_call({fuzzy_search, Term, Max}, _From, State) ->
+    {reply, with_conn(State, fun(Pid) -> do_fuzzy_search(Pid, Term, Max) end), State};
+handle_call({search_by_value, Pattern, Search, Max}, _From, State) ->
+    {reply, with_conn(State, fun(Pid) -> do_search_by_value(Pid, Pattern, Search, Max) end), State};
+handle_call({compare_keys, Key1, Key2}, _From, State) ->
+    {reply, with_conn(State, fun(Pid) -> do_compare_keys(Pid, Key1, Key2) end), State};
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
@@ -656,6 +686,91 @@ do_db_size(Pid) ->
         {ok, NBin} -> {ok, to_int(NBin, 0)};
         {error, Reason} -> {error, Reason}
     end.
+
+%% ---------------------------------------------------------------------------
+%% Search
+%% ---------------------------------------------------------------------------
+
+-spec do_scan_regex(pid(), binary(), pos_integer()) -> {ok, [map()]} | {error, term()}.
+do_scan_regex(Pid, Pattern, Max) ->
+    case dui_redis_search:compile_regex(Pattern) of
+        {ok, _MP} ->
+            Keys = scan_all_keys(Pid, <<"*">>),
+            Matching = [K || K <- Keys, dui_redis_search:regex_match(Pattern, K)],
+            {ok, enrich(Pid, lists:sublist(Matching, Max))};
+        {error, Reason} ->
+            {error, {invalid_regex, Reason}}
+    end.
+
+-spec do_fuzzy_search(pid(), binary(), pos_integer()) -> {ok, [map()]} | {error, term()}.
+do_fuzzy_search(Pid, Term, Max) ->
+    Keys = scan_all_keys(Pid, <<"*">>),
+    Maps = [#{key => K, type => string, ttl => -1} || K <- Keys],
+    Ranked = dui_redis_search:fuzzy_rank(Maps, Term, Max),
+    {ok, enrich(Pid, [maps:get(key, K) || K <- Ranked])}.
+
+-spec do_search_by_value(pid(), binary(), binary(), pos_integer()) ->
+    {ok, [map()]} | {error, term()}.
+do_search_by_value(Pid, Pattern, Search, Max) ->
+    Pattern1 = case Pattern of <<>> -> <<"*">>; _ -> Pattern end,
+    Keys = scan_all_keys(Pid, Pattern1),
+    Matches = search_value_keys(Pid, Keys, Search, Max, []),
+    {ok, enrich(Pid, Matches)}.
+
+-spec search_value_keys(pid(), [binary()], binary(), non_neg_integer(), [binary()]) ->
+    [binary()].
+search_value_keys(_Pid, [], _Search, _Max, Acc) ->
+    lists:reverse(Acc);
+search_value_keys(_Pid, _Keys, _Search, Max, Acc) when length(Acc) >= Max ->
+    lists:reverse(Acc);
+search_value_keys(Pid, [Key | Rest], Search, Max, Acc) ->
+    Acc1 = case do_value_preview(Pid, Key) of
+        {ok, Value} ->
+            case dui_redis_search:value_contains(Search, Value) of
+                true -> [Key | Acc];
+                false -> Acc
+            end;
+        _ -> Acc
+    end,
+    search_value_keys(Pid, Rest, Search, Max, Acc1).
+
+-spec do_compare_keys(pid(), binary(), binary()) ->
+    {ok, {map(), map(), binary()}} | {error, term()}.
+do_compare_keys(Pid, Key1, Key2) ->
+    case {do_value_detail(Pid, Key1), do_value_detail(Pid, Key2)} of
+        {{ok, V1}, {ok, V2}} ->
+            {ok, {V1, V2, dui_redis_search:diff(V1, V2)}};
+        {{error, Reason}, _} ->
+            {error, Reason};
+        {_, {error, Reason}} ->
+            {error, Reason}
+    end.
+
+-spec scan_all_keys(pid(), binary()) -> [binary()].
+scan_all_keys(Pid, Pattern) ->
+    scan_all_keys(Pid, Pattern, <<"0">>, [], 0).
+
+-spec scan_all_keys(pid(), binary(), binary(), [binary()], non_neg_integer()) -> [binary()].
+scan_all_keys(_Pid, _Pattern, _Cursor, Acc, Count) when Count >= 100000 ->
+    Acc;
+scan_all_keys(Pid, Pattern, Cursor, Acc, Count) ->
+    Cmd = [<<"SCAN">>, Cursor, <<"MATCH">>, Pattern, <<"COUNT">>, <<"1000">>],
+    case eredis:q(Pid, Cmd) of
+        {ok, [Next, Keys]} when is_list(Keys) ->
+            Acc1 = Acc ++ Keys,
+            case Next of
+                <<"0">> -> Acc1;
+                _ -> scan_all_keys(Pid, Pattern, Next, Acc1, Count + length(Keys))
+            end;
+        _ ->
+            Acc
+    end.
+
+-spec enrich(pid(), [binary()]) -> [map()].
+enrich(Pid, Keys) ->
+    K0 = [#{key => K, type => string, ttl => -1} || K <- Keys],
+    K1 = fill_type_ttl(Pid, K0),
+    detect_string_subtypes(Pid, detect_zset_subtypes(Pid, K1)).
 
 %% ---------------------------------------------------------------------------
 %% Small helpers

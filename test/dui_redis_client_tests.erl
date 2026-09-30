@@ -124,6 +124,31 @@ live_write_ops() ->
     ?assertEqual([<<"a">>], maps:get(items, V)),
     ok = dui_redis_client:disconnect().
 
+live_search_test_() ->
+    case redis_available() of
+        true -> {timeout, 30, fun live_search/0};
+        false -> []
+    end.
+
+live_search() ->
+    ensure_client(),
+    ok = dui_redis_client:connect(#{host => <<"localhost">>, port => 6379, db => 0}),
+    {ok, _} = dui_redis_client:q([<<"FLUSHDB">>]),
+    {ok, _} = dui_redis_client:set_string(<<"m4:user:1">>, <<"needle here">>, 0),
+    {ok, _} = dui_redis_client:set_string(<<"m4:user:2">>, <<"nothing">>, 0),
+    {ok, _} = dui_redis_client:set_string(<<"m4:other">>, <<"needle too">>, 0),
+    {ok, R1} = dui_redis_client:scan_regex(<<"^m4:user">>, 100),
+    ?assertEqual([<<"m4:user:1">>, <<"m4:user:2">>],
+                 lists:sort([maps:get(key, K) || K <- R1])),
+    {ok, R2} = dui_redis_client:fuzzy_search(<<"user">>, 100),
+    ?assert(length(R2) >= 1),
+    {ok, R3} = dui_redis_client:search_by_value(<<"m4:*">>, <<"needle">>, 100),
+    ?assertEqual([<<"m4:other">>, <<"m4:user:1">>],
+                 lists:sort([maps:get(key, K) || K <- R3])),
+    {ok, {_V1, _V2, Diff}} = dui_redis_client:compare_keys(<<"m4:user:1">>, <<"m4:user:2">>),
+    ?assert(is_binary(Diff)),
+    ok = dui_redis_client:disconnect().
+
 %% ---------------------------------------------------------------------------
 
 ensure_client() ->
