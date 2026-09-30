@@ -20,6 +20,28 @@ help_toggle_test() ->
     ?assertEqual(ok, educkui_test:assert_text(Pid, <<"No connections saved">>)),
     cleanup(Pid, Dir).
 
+mouse_click_selects_connection_test() ->
+    Dir = mk_tmp(),
+    Path = filename:join(Dir, "config.json"),
+    save_conn(Path, <<"A">>, <<"localhost">>, 6379),
+    save_conn(Path, <<"B">>, <<"localhost">>, 6379),
+    save_conn(Path, <<"C">>, <<"localhost">>, 6379),
+    Pid = educkui_test:start(#{root => dui_redis_root, size => {24, 80},
+                               init_args => [{opts, #{config_path => Path}}]}),
+    ok = educkui_test:send_event(Pid, educkui_event:resize(80, 24)),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> length(S#dui_state.connections) =:= 3 end, 500)),
+    ok = educkui_test:render(Pid),
+    %% Connection list rows start at screen row 10; the third row is Y=12.
+    ok = educkui_test:send_event(Pid, educkui_event:mouse(press, left, 5, 12)),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.selected =:= 2 end, 100)),
+    %% Keyboard still reaches the root after the mouse layer takes focus.
+    ok = educkui_test:send_key(Pid, <<"k">>),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.selected =:= 1 end, 100)),
+    cleanup(Pid, Dir).
+
 initial_resize_delivered_test() ->
     {Pid, Dir} = start_root(),
     ?assertEqual(ok, educkui_test:wait_until(Pid,

@@ -59,6 +59,10 @@ update(tick, State) ->
     {S2, tick_commands(S2)};
 update({resize, W, H}, State) ->
     {dui_redis_state:set_size(State, H, W), []};
+update({mouse_click, X, Y}, State) ->
+    mouse_select(State, X, Y);
+update({mouse_scroll, Dir, _X, _Y}, State) ->
+    mouse_scroll(State, Dir);
 update({config_loaded, {ok, Config}}, State) ->
     maybe_auto_connect(dui_redis_state:put_config(State, Config));
 update({config_loaded, {error, Reason}}, State) ->
@@ -1902,10 +1906,13 @@ has_ctrl_like(Mods) ->
 
 -spec view(#dui_state{}) -> #dui_node{}.
 view(State) ->
-    educkui_render_node:stack(vertical, [
-        title_bar(State),
-        body(State),
-        status_bar(State)
+    educkui_render_node:overlay([
+        educkui_render_node:component(dui_mouse_layer, dui_redis_mouse),
+        educkui_render_node:stack(vertical, [
+            title_bar(State),
+            body(State),
+            status_bar(State)
+        ])
     ]).
 
 -spec title_bar(#dui_state{}) -> #dui_node{}.
@@ -2066,18 +2073,156 @@ gauge_row(Value, Width, FillStyle) ->
         BarW),
     educkui_render_node:stack(horizontal, [Gauge]).
 
+%% -- mouse hit testing ------------------------------------------------------
+
+%% @doc Selects the list row under a mouse click, per screen.
+-spec mouse_select(#dui_state{}, integer(), integer()) ->
+    {#dui_state{}, [educkui_command:command()]}.
+mouse_select(#dui_state{screen = connections} = State, _X, Y) ->
+    Top = 10 + connection_error_count(State),
+    case list_index(Y, Top, connections_visible(State),
+                    length(dui_redis_state:connections(State)),
+                    dui_redis_state:selected(State)) of
+        undefined -> {State, []};
+        I -> {dui_redis_state:set_selected(State, I), []}
+    end;
+mouse_select(#dui_state{screen = keys} = State, X, Y) ->
+    {_, Cols} = dui_redis_state:size(State),
+    ListW = case Cols >= 100 of
+        true -> (Cols * 6) div 10;
+        false -> Cols
+    end,
+    case X < ListW of
+        false ->
+            {State, []};
+        true ->
+            case list_index(Y, 7, keys_visible(State),
+                            length(dui_redis_state:keys(State)),
+                            dui_redis_state:selected_key(State)) of
+                undefined -> {State, []};
+                I -> select_key(State, I)
+            end
+    end;
+mouse_select(#dui_state{screen = results} = State, _X, Y) ->
+    case list_index(Y, 3, results_visible(State),
+                    length(dui_redis_state:results(State)),
+                    dui_redis_state:selected_result(State)) of
+        undefined -> {State, []};
+        I -> {dui_redis_state:set_selected_result(State, I), []}
+    end;
+mouse_select(#dui_state{screen = tree} = State, _X, Y) ->
+    case list_index(Y, 3, results_visible(State),
+                    length(flattened_tree(State)),
+                    dui_redis_state:selected_tree(State)) of
+        undefined -> {State, []};
+        I -> {dui_redis_state:set_selected_tree(State, I), []}
+    end;
+mouse_select(#dui_state{screen = S} = State, _X, Y)
+        when S =:= slow_log; S =:= client_list; S =:= expiring_keys;
+             S =:= pubsub_channels; S =:= redis_config; S =:= cluster_info;
+             S =:= groups ->
+    case list_index(Y, 4, monitor_visible(State), monitor_row_count(State),
+                    dui_redis_state:row_selected(State)) of
+        undefined -> {State, []};
+        I -> {dui_redis_state:set_row_selected(State, I), []}
+    end;
+mouse_select(State, _X, _Y) ->
+    {State, []}.
+
+%% @doc Scrolls the active list with the mouse wheel.
+-spec mouse_scroll(#dui_state{}, up | down) ->
+    {#dui_state{}, [educkui_command:command()]}.
+mouse_scroll(State, up) -> scroll_select(State, -3);
+mouse_scroll(State, down) -> scroll_select(State, 3).
+
+-spec scroll_select(#dui_state{}, integer()) ->
+    {#dui_state{}, [educkui_command:command()]}.
+scroll_select(#dui_state{screen = keys} = State, Delta) ->
+    move_key(State, Delta);
+scroll_select(#dui_state{screen = connections} = State, Delta) ->
+    {move_selected(State, Delta), []};
+scroll_select(#dui_state{screen = results} = State, Delta) ->
+    Count = length(dui_redis_state:results(State)),
+    {dui_redis_state:set_selected_result(State,
+        clamp_index(dui_redis_state:selected_result(State) + Delta, Count)), []};
+scroll_select(#dui_state{screen = tree} = State, Delta) ->
+    Count = length(flattened_tree(State)),
+    {dui_redis_state:set_selected_tree(State,
+        clamp_index(dui_redis_state:selected_tree(State) + Delta, Count)), []};
+scroll_select(#dui_state{screen = S} = State, Delta)
+        when S =:= slow_log; S =:= client_list; S =:= expiring_keys;
+             S =:= pubsub_channels; S =:= redis_config; S =:= cluster_info;
+             S =:= groups ->
+    Count = monitor_row_count(State),
+    {dui_redis_state:set_row_selected(State,
+        clamp_index(dui_redis_state:row_selected(State) + Delta, Count)), []};
+scroll_select(State, _Delta) ->
+    {State, []}.
+
+%% @doc Maps a screen row to a list index, accounting for the scroll offset.
+-spec list_index(integer(), pos_integer(), pos_integer(), non_neg_integer(),
+                 non_neg_integer()) -> non_neg_integer() | undefined.
+list_index(Y, Top, Visible, Total, Selected) ->
+    {Offset, _} = educkui_widget_list:visible_range(Total, Selected, Visible),
+    Row = Y - Top,
+    Index = Row + Offset,
+    case Row >= 0 andalso Row < Visible andalso Index >= 0 andalso Index < Total of
+        true -> Index;
+        false -> undefined
+    end.
+
+-spec clamp_index(integer(), non_neg_integer()) -> non_neg_integer().
+clamp_index(_I, 0) -> 0;
+clamp_index(I, Count) -> max(0, min(Count - 1, I)).
+
+-spec connection_error_count(#dui_state{}) -> non_neg_integer().
+connection_error_count(State) ->
+    case dui_redis_state:connection_error(State) of
+        undefined -> 0;
+        _ -> 1
+    end.
+
+-spec connections_visible(#dui_state{}) -> pos_integer().
+connections_visible(State) ->
+    {Rows, _} = dui_redis_state:size(State),
+    max(1, Rows - 12 - connection_error_count(State)).
+
+-spec keys_visible(#dui_state{}) -> pos_integer().
+keys_visible(State) ->
+    {Rows, _} = dui_redis_state:size(State),
+    max(1, Rows - 9).
+
+-spec results_visible(#dui_state{}) -> pos_integer().
+results_visible(State) ->
+    {Rows, _} = dui_redis_state:size(State),
+    max(1, Rows - 6).
+
+%% @doc Visible rows for `lines_view' screens (all carry a column header).
+-spec monitor_visible(#dui_state{}) -> pos_integer().
+monitor_visible(State) ->
+    {Rows, _} = dui_redis_state:size(State),
+    max(1, Rows - 7).
+
+-spec monitor_row_count(#dui_state{}) -> non_neg_integer().
+monitor_row_count(State) ->
+    case dui_redis_state:screen(State) of
+        slow_log -> length(dui_redis_state:slow_log(State));
+        client_list -> length(dui_redis_state:clients(State));
+        expiring_keys -> length(dui_redis_state:expiring(State));
+        pubsub_channels -> length(dui_redis_state:channels(State));
+        redis_config -> length(dui_redis_state:config_params(State));
+        cluster_info -> length(dui_redis_state:cluster_nodes(State));
+        groups -> length(dui_redis_state:groups(State));
+        _ -> 0
+    end.
+
 %% -- connections ------------------------------------------------------------
 
 -spec connections_view(#dui_state{}) -> #dui_node{}.
 connections_view(State) ->
     Conns = dui_redis_state:connections(State),
     Header = iolist_to_binary(io_lib:format("Saved Connections (~b)", [length(Conns)])),
-    {Rows, _} = dui_redis_state:size(State),
-    ErrorCount = case dui_redis_state:connection_error(State) of
-        undefined -> 0;
-        _ -> 1
-    end,
-    Visible = max(1, Rows - 12 - ErrorCount),
+    Visible = connections_visible(State),
     Body = case Conns of
         [] ->
             educkui_render_node:text(
@@ -2434,8 +2579,7 @@ results_view(State) ->
     Results = dui_redis_state:results(State),
     Count = length(Results),
     Selected = min(dui_redis_state:selected_result(State), max(0, Count - 1)),
-    {Rows, _} = dui_redis_state:size(State),
-    Visible = max(1, Rows - 6),
+    Visible = results_visible(State),
     {Offset, _} = educkui_widget_list:visible_range(Count, Selected, Visible),
     Window = lists:sublist(Results, Offset + 1, Visible),
     Lines = [result_line(Purpose, R) || R <- Window],
@@ -2489,8 +2633,7 @@ tree_view(State) ->
     Count = length(Flat),
     Selected = min(dui_redis_state:selected_tree(State), max(0, Count - 1)),
     Expanded = dui_redis_state:tree_expanded(State),
-    {Rows, _} = dui_redis_state:size(State),
-    Visible = max(1, Rows - 6),
+    Visible = results_visible(State),
     {Offset, _} = educkui_widget_list:visible_range(Count, Selected, Visible),
     Window = lists:sublist(Flat, Offset + 1, Visible),
     Lines = [tree_line(Depth, Node, Expanded) || {Depth, Node} <- Window],
@@ -2868,8 +3011,7 @@ keys_view(State) ->
 
 -spec keys_panel(#dui_state{}, pos_integer()) -> #dui_node{}.
 keys_panel(State, Width) ->
-    {Rows, _} = dui_redis_state:size(State),
-    Visible = max(1, Rows - 9),
+    Visible = keys_visible(State),
     Keys = dui_redis_state:keys(State),
     Total = length(Keys),
     Selected = min(dui_redis_state:selected_key(State), max(0, Total - 1)),
