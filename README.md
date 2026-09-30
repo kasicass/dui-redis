@@ -9,27 +9,21 @@ A Redis terminal UI manager built with [educkui](https://github.com/kasicass/edu
 
 ## Status
 
-**M6 — ops and cluster** (done; some items deferred). Currently implemented:
+**M7 — advanced display and security** (done; some UI deferred). All planned
+milestones M0–M7 are implemented. Highlights:
 
-- educkui runtime integration (root Elm component, help overlay, status bar)
-- CLI parsing via OTP `argparse` (redis-cli style flags)
-- JSON configuration at `~/.config/dui-redis/config.json` (secrets stripped)
-- connection manager: list, add/edit form, test connection, delete confirmation
-- connect/disconnect against Redis via `eredis`; auto-connect from `--host`
-- key browser: table (key/type/TTL), live filter, sort, paging, switch DB
-- bounded value preview (100 items / 64 KB) with HLL/bitmap/geo detection
-- key detail screen with metadata and value; string/JSON editing (Ctrl+S/F2)
-- rename/copy/TTL/delete, flush DB, and add/remove collection items
-- regex / fuzzy / search-by-value, compare keys, JSONPath
-- favorites, recent keys and key templates (persisted); prefix tree view
-- in-memory value history
-- monitoring: server info, slow log, clients, memory stats, live metrics,
-  expiring keys, logs
-- ops: pub/sub channels + publish, Lua scripting, Redis config, export/import,
-  bulk delete, batch TTL, cluster info, connection groups
+- connection manager, key browser, detail/edit, search/favorites/tree,
+  monitoring, ops/cluster (see git history for the per-milestone breakdown)
+- schema-less protobuf and Snappy/S2 decoding of binary string values
+- JSON syntax highlighting in the detail view
+- HashiCorp Vault credential resolution (KV v1/v2, dot selectors)
+- TLS via CLI/config; OSC 52 clipboard copy (`y`)
+- 143 EUnit tests; `./scripts/ci.sh` (compile → eunit → xref → dialyzer → edoc)
 
 Deferred: live Pub/Sub subscription stream and Keyspace Events; cluster-mode
-connection. Later milestones: M7 (protobuf/s2 decoding, TLS, Vault).
+connection; Key Bindings customization UI; TLS certificate form.
+
+See [`../dui-redis-plan.md`](../dui-redis-plan.md) for the full plan.
 
 ## Requirements
 
