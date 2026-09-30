@@ -38,29 +38,48 @@ Dependencies are declared in `rebar.config`:
 
 ## Build and run
 
-> **Local dev note**: until the educkui cursor-optimizer fix (commit `9818028`) is on
-> `github.com/kasicass/educkui`, this repo uses `_checkouts/educkui` (a gitignored
-> symlink to `../tui/educkui`) so the local educkui is used. Once pushed, remove
-> `_checkouts/` and run `rebar3 upgrade educkui` to refresh `rebar.lock`.
+Requirements: Erlang/OTP 28+, rebar3, and a running Redis server (4.0+).
 
 ```bash
 rebar3 compile
 
-# from a shell
-rebar3 shell
-1> dui_redis:run([]).
+# convenience launcher (builds, then passes every flag through)
+./scripts/run.sh
 
-# or as an escript (see scripts/)
+# quick connect
+./scripts/run.sh --host localhost
+
+# connect with password and database
+./scripts/run.sh -h redis.example.com -p 6380 -a mypassword -n 2
+
+# print version
+./scripts/run.sh --version
 ```
 
-Quick connect:
+Or launch manually:
 
 ```bash
+# non-interactive erl
+PA=$(ls -d _build/default/lib/*/ebin | sed 's/^/-pa /')
+erl $PA -noshell -eval 'dui_redis:run([]), init:stop().'
+
+# from rebar3 shell
 rebar3 shell
-1> dui_redis:run(["--host", "localhost", "-p", "6379", "-n", "0"]).
+1> dui_redis:run(["--host", "localhost"]).
 ```
 
-Press `?` for help, `q` to quit.
+Press `?` for help, `q` to quit, `Ctrl+C` to force quit.
+
+Key screens:
+
+- **Connections**: `Enter` connect, `a` add, `e` edit, `d` delete, `g` groups, `r` reload.
+- **Keys**: `j/k` navigate, `Enter` detail, `/` filter, `s/S` sort, `l` load more,
+  `F` favorites, `H` recent, `W` tree, `v` search values, `Ctrl+R` regex,
+  `Ctrl+F` fuzzy, `Ctrl+G` Redis config, `m` live metrics, `C` cluster,
+  `B` bulk delete, `T` batch TTL, `e` export, `I` import, `D` switch DB,
+  `esc` disconnect.
+- **Key detail**: `e` edit, `a`/`x` add/remove item, `t` TTL, `R` rename,
+  `c` copy, `y` copy to clipboard, `J` JSONPath, `d` delete.
 
 ## CLI flags
 
