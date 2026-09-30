@@ -105,6 +105,20 @@
     set_row_selected/2,
     channels/1,
     set_channels/2,
+    sub/1,
+    set_sub/2,
+    sub_target/1,
+    set_sub_target/2,
+    sub_kind/1,
+    set_sub_kind/2,
+    sub_messages/1,
+    set_sub_messages/2,
+    push_sub_message/2,
+    clear_sub_messages/1,
+    sub_scroll/1,
+    set_sub_scroll/2,
+    sub_follow/1,
+    set_sub_follow/2,
     config_params/1,
     set_config_params/2,
     cluster_nodes/1,
@@ -482,6 +496,57 @@ channels(#dui_state{channels = C}) -> C.
 
 -spec set_channels(#dui_state{}, [binary()]) -> #dui_state{}.
 set_channels(State, C) -> State#dui_state{channels = C, row_selected = 0, loading = false}.
+
+-spec sub(#dui_state{}) -> pid() | undefined.
+sub(#dui_state{sub = P}) -> P.
+
+-spec set_sub(#dui_state{}, pid() | undefined) -> #dui_state{}.
+set_sub(State, P) -> State#dui_state{sub = P}.
+
+-spec sub_target(#dui_state{}) -> binary().
+sub_target(#dui_state{sub_target = T}) -> T.
+
+-spec set_sub_target(#dui_state{}, binary()) -> #dui_state{}.
+set_sub_target(State, T) -> State#dui_state{sub_target = T}.
+
+-spec sub_kind(#dui_state{}) -> channel | pattern.
+sub_kind(#dui_state{sub_kind = K}) -> K.
+
+-spec set_sub_kind(#dui_state{}, channel | pattern) -> #dui_state{}.
+set_sub_kind(State, K) -> State#dui_state{sub_kind = K}.
+
+-spec sub_messages(#dui_state{}) -> [map()].
+sub_messages(#dui_state{sub_messages = M}) -> M.
+
+-spec set_sub_messages(#dui_state{}, [map()]) -> #dui_state{}.
+set_sub_messages(State, M) ->
+    State#dui_state{sub_messages = M, sub_scroll = 0, sub_follow = true}.
+
+%% @doc Appends a message, keeping only the newest 500.
+-spec push_sub_message(#dui_state{}, map()) -> #dui_state{}.
+push_sub_message(#dui_state{sub_messages = M} = State, Msg) ->
+    M1 = M ++ [Msg],
+    M2 = case length(M1) > 500 of
+        true -> lists:nthtail(length(M1) - 500, M1);
+        false -> M1
+    end,
+    State#dui_state{sub_messages = M2}.
+
+-spec clear_sub_messages(#dui_state{}) -> #dui_state{}.
+clear_sub_messages(State) ->
+    State#dui_state{sub_messages = [], sub_scroll = 0, sub_follow = true}.
+
+-spec sub_scroll(#dui_state{}) -> non_neg_integer().
+sub_scroll(#dui_state{sub_scroll = S}) -> S.
+
+-spec set_sub_scroll(#dui_state{}, non_neg_integer()) -> #dui_state{}.
+set_sub_scroll(State, S) -> State#dui_state{sub_scroll = max(0, S)}.
+
+-spec sub_follow(#dui_state{}) -> boolean().
+sub_follow(#dui_state{sub_follow = F}) -> F.
+
+-spec set_sub_follow(#dui_state{}, boolean()) -> #dui_state{}.
+set_sub_follow(State, F) -> State#dui_state{sub_follow = F}.
 
 -spec config_params(#dui_state{}) -> [{binary(), binary()}].
 config_params(#dui_state{config_params = P}) -> P.

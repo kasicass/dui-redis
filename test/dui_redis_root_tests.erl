@@ -512,6 +512,59 @@ live_ops_screens() ->
     _ = application:stop(dui_redis),
     ok.
 
+live_subscribe_test_() ->
+    case redis_available() of
+        true -> {timeout, 40, fun live_subscribe/0};
+        false -> []
+    end.
+
+live_subscribe() ->
+    reset_app(),
+    Dir = mk_tmp(),
+    Path = filename:join(Dir, "config.json"),
+    save_conn(Path, <<"Local">>, <<"localhost">>, 6379),
+    Pid = educkui_test:start(#{root => dui_redis_root, size => {30, 100},
+                               init_args => [{opts, #{config_path => Path}}]}),
+    ok = educkui_test:send_event(Pid, educkui_event:resize(100, 30)),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 500)),
+    ok = educkui_test:send_key(Pid, enter),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.connected end, 300)),
+    %% Ctrl+P opens the subscribe prompt.
+    ok = educkui_test:send_event(Pid,
+        educkui_event:key(<<"p">>, [{modifiers, [ctrl]}])),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.screen =:= prompt end, 150)),
+    ok = educkui_test:send_keys(Pid, [<<"subtest">>]),
+    ok = educkui_test:send_key(Pid, enter),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.screen =:= subscribe end, 200)),
+    %% Publish from a separate connection and wait for the message.
+    ok = publish_until(Pid, <<"subtest">>, <<"hello-pubsub">>, 100),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"hello-pubsub">>)),
+    ok = educkui_test:send_key(Pid, esc),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.screen =:= keys end, 100)),
+    cleanup(Pid, Dir),
+    _ = application:stop(dui_redis),
+    ok.
+
+%% Republishes until the root has received at least one message (the subscribe
+%% acknowledgement and the publish can race).
+publish_until(Pid, Channel, Payload, 0) ->
+    _ = {Pid, Channel, Payload},
+    error(subscribe_timeout);
+publish_until(Pid, Channel, Payload, N) ->
+    {ok, C} = eredis:start_link([{host, "localhost"}, {port, 6379}, {database, 0}]),
+    _ = eredis:q(C, [<<"PUBLISH">>, Channel, Payload]),
+    eredis:stop(C),
+    case educkui_test:wait_until(Pid,
+            fun(S) -> S#dui_state.sub_messages =/= [] end, 10) of
+        ok -> ok;
+        _ -> publish_until(Pid, Channel, Payload, N - 1)
+    end.
+
 start_root() ->
     Dir = mk_tmp(),
     Path = filename:join(Dir, "config.json"),

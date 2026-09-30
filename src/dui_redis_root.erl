@@ -285,6 +285,21 @@ update({published, Channel, {ok, N}}, State) ->
     {dui_redis_state:set_status(S1, info, Msg), []};
 update({published, _Channel, {error, Reason}}, State) ->
     {dui_redis_state:set_status(State, error, error_text(Reason)), []};
+update({pubsub_message, Channel, Payload}, State) ->
+    Msg = #{channel => Channel, payload => Payload, at => erlang:localtime()},
+    {dui_redis_state:push_sub_message(State, Msg), []};
+update({pubsub_subscribed, Channel}, State) ->
+    Msg = <<"Subscribed to ", Channel/binary>>,
+    {dui_redis_state:set_status(State, info, Msg), []};
+update({pubsub_unsubscribed, Channel}, State) ->
+    Msg = <<"Unsubscribed from ", Channel/binary>>,
+    {dui_redis_state:set_status(State, info, Msg), []};
+update(pubsub_disconnected, State) ->
+    {dui_redis_state:set_status(State, error, <<"Subscription disconnected">>), []};
+update(pubsub_connected, State) ->
+    {dui_redis_state:set_status(State, info, <<"Subscription reconnected">>), []};
+update({pubsub_stopped, _Reason}, State) ->
+    {dui_redis_state:set_sub(State, undefined), []};
 update({lua_result, {ok, Value}}, State) ->
     S1 = dui_redis_state:set_result_text(State, to_bin(Value)),
     {dui_redis_state:set_screen(S1, result_text), []};
@@ -425,6 +440,8 @@ handle_escape(#dui_state{screen = keys} = State) ->
     {dui_redis_state:set_loading(State, true), [dui_redis_cmd:disconnect()]};
 handle_escape(#dui_state{screen = switch_db} = State) ->
     {dui_redis_state:set_screen(State, keys), []};
+handle_escape(#dui_state{screen = subscribe} = State) ->
+    stop_subscribe(State);
 handle_escape(#dui_state{screen = live_metrics} = State) ->
     S1 = dui_redis_state:set_metrics_active(State, false),
     {dui_redis_state:set_screen(S1, keys), []};
@@ -463,6 +480,8 @@ screen_key(#dui_state{screen = result_text} = State, _Key, _Mods) ->
     {State, []};
 screen_key(#dui_state{screen = switch_db} = State, Key, _Mods) ->
     switch_db_key(State, Key);
+screen_key(#dui_state{screen = subscribe} = State, Key, _Mods) ->
+    subscribe_key(State, Key);
 screen_key(#dui_state{screen = S} = State, Key, Mods)
         when S =:= server_info; S =:= slow_log; S =:= client_list;
              S =:= memory_stats; S =:= live_metrics; S =:= expiring_keys;
@@ -722,8 +741,11 @@ keys_nav_key(State, <<"x">>, Mods) ->
     end;
 keys_nav_key(State, <<"O">>, _Mods) ->
     start_logs(State);
-keys_nav_key(State, <<"p">>, _Mods) ->
-    start_channels(State);
+keys_nav_key(State, <<"p">>, Mods) ->
+    case lists:member(ctrl, Mods) of
+        true -> start_prompt(State, subscribe);
+        false -> start_channels(State)
+    end;
 keys_nav_key(State, <<"E">>, _Mods) ->
     start_prompt(State, lua);
 keys_nav_key(State, <<"e">>, _Mods) ->
@@ -1138,6 +1160,9 @@ start_prompt(State, json_path) ->
     Prompt = dui_redis_prompt:new([{path, <<"JSONPath (e.g. $.name)">>, false}],
                                   #{path => <<"$">>}),
     open_prompt(State, Prompt, {json_path, KeyMap});
+start_prompt(State, subscribe) ->
+    Prompt = dui_redis_prompt:new([{target, <<"Channel or pattern">>, false}]),
+    open_prompt(State, Prompt, subscribe);
 start_prompt(State, {publish, Channel}) ->
     Prompt = dui_redis_prompt:new([{message, <<"Message">>, false}]),
     open_prompt(State, Prompt, {publish, Channel});
@@ -1235,10 +1260,15 @@ submit_prompt(State) ->
     Purpose = dui_redis_state:prompt_purpose(State),
     Prompt = dui_redis_state:prompt(State),
     Values = dui_redis_prompt:to_map(Prompt),
-    {Screen, Commands} = prompt_action(Purpose, Values),
     S1 = dui_redis_state:set_prompt(State, undefined),
-    S2 = dui_redis_state:set_screen(S1, Screen),
-    {S2, Commands}.
+    case Purpose of
+        subscribe ->
+            start_subscribe(S1, string:trim(maps:get(target, Values, <<>>)));
+        _ ->
+            {Screen, Commands} = prompt_action(Purpose, Values),
+            S2 = dui_redis_state:set_screen(S1, Screen),
+            {S2, Commands}
+    end.
 
 -spec prompt_action(term(), map()) -> {atom(), [educkui_command:command()]}.
 prompt_action({rename, KeyMap}, Values) ->
@@ -1733,9 +1763,24 @@ monitor_key(State, Key, _Mods) ->
             {dui_redis_state:set_row_selected(State, 0), []};
         K when K =:= 'end'; K =:= <<"G">> ->
             {dui_redis_state:set_row_selected(State, max(0, Count - 1)), []};
+        <<"s">> -> subscribe_selected(State);
         <<"r">> -> reload_monitor(State);
         _ -> {State, []}
     end.
+
+-spec subscribe_selected(#dui_state{}) ->
+    {#dui_state{}, [educkui_command:command()]}.
+subscribe_selected(#dui_state{screen = pubsub_channels} = State) ->
+    Channels = dui_redis_state:channels(State),
+    case Channels of
+        [] ->
+            {State, []};
+        _ ->
+            Index = min(dui_redis_state:row_selected(State), length(Channels) - 1),
+            start_subscribe(State, lists:nth(Index + 1, Channels))
+    end;
+subscribe_selected(State) ->
+    {State, []}.
 
 -spec reload_monitor(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
 reload_monitor(State) ->
@@ -1989,6 +2034,8 @@ screen_view(#dui_state{screen = result_text} = State) ->
     result_text_view(State);
 screen_view(#dui_state{screen = switch_db} = State) ->
     switch_db_view(State);
+screen_view(#dui_state{screen = subscribe} = State) ->
+    subscribe_view(State);
 screen_view(#dui_state{screen = S} = State)
         when S =:= server_info; S =:= slow_log; S =:= client_list;
              S =:= memory_stats; S =:= live_metrics; S =:= expiring_keys;
@@ -2130,6 +2177,8 @@ mouse_scroll(State, down) -> scroll_select(State, 3).
 
 -spec scroll_select(#dui_state{}, integer()) ->
     {#dui_state{}, [educkui_command:command()]}.
+scroll_select(#dui_state{screen = subscribe} = State, Delta) ->
+    scroll_sub(State, Delta);
 scroll_select(#dui_state{screen = keys} = State, Delta) ->
     move_key(State, Delta);
 scroll_select(#dui_state{screen = connections} = State, Delta) ->
@@ -3143,6 +3192,143 @@ switch_db_view(State) ->
     ],
     modal(State, <<"Switch Database">>, Content, 44).
 
+%% -- pub/sub subscription ---------------------------------------------------
+
+-spec start_subscribe(#dui_state{}, binary()) ->
+    {#dui_state{}, [educkui_command:command()]}.
+start_subscribe(State, <<>>) ->
+    {dui_redis_state:set_screen(State, keys), []};
+start_subscribe(State, Target) ->
+    S1 = stop_sub_process(State),
+    case dui_redis_sub:start(runtime(State), dui_redis_state:current_conn(State), Target) of
+        {ok, Pid} ->
+            S2 = dui_redis_state:set_sub(S1, Pid),
+            S3 = dui_redis_state:set_sub_target(S2, Target),
+            S4 = dui_redis_state:set_sub_kind(S3, sub_kind(Target)),
+            S5 = dui_redis_state:clear_sub_messages(S4),
+            S6 = dui_redis_state:set_screen(S5, subscribe),
+            Msg = <<"Subscribing to ", Target/binary>>,
+            {dui_redis_state:set_status(S6, info, Msg), []};
+        {error, Reason} ->
+            {dui_redis_state:set_status(State, error, error_text(Reason)), []}
+    end.
+
+-spec stop_subscribe(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+stop_subscribe(State) ->
+    S1 = stop_sub_process(State),
+    S2 = dui_redis_state:clear_sub_messages(S1),
+    S3 = dui_redis_state:set_sub_target(S2, <<>>),
+    {dui_redis_state:set_screen(S3, keys), []}.
+
+-spec stop_sub_process(#dui_state{}) -> #dui_state{}.
+stop_sub_process(State) ->
+    case dui_redis_state:sub(State) of
+        undefined -> State;
+        Pid ->
+            dui_redis_sub:stop(Pid),
+            dui_redis_state:set_sub(State, undefined)
+    end.
+
+-spec sub_kind(binary()) -> channel | pattern.
+sub_kind(Target) ->
+    case binary:match(Target, [<<"*">>, <<"?">>, <<"[">>]) of
+        nomatch -> channel;
+        _ -> pattern
+    end.
+
+-spec subscribe_key(#dui_state{}, term()) ->
+    {#dui_state{}, [educkui_command:command()]}.
+subscribe_key(State, Key) ->
+    case Key of
+        K when K =:= <<"j">>; K =:= down -> scroll_sub(State, 1);
+        K when K =:= <<"k">>; K =:= up -> scroll_sub(State, -1);
+        page_down -> scroll_sub(State, 10);
+        page_up -> scroll_sub(State, -10);
+        K when K =:= 'end'; K =:= <<"G">> -> scroll_sub(State, 1000000);
+        K when K =:= home; K =:= <<"g">> -> scroll_sub(State, -1000000);
+        <<"c">> -> {dui_redis_state:clear_sub_messages(State), []};
+        _ -> {State, []}
+    end.
+
+-spec scroll_sub(#dui_state{}, integer()) ->
+    {#dui_state{}, [educkui_command:command()]}.
+scroll_sub(State, Delta) ->
+    Visible = sub_visible(State),
+    Count = length(dui_redis_state:sub_messages(State)),
+    MaxScroll = max(0, Count - Visible),
+    Current = case dui_redis_state:sub_follow(State) of
+        true -> MaxScroll;
+        false -> min(dui_redis_state:sub_scroll(State), MaxScroll)
+    end,
+    New = max(0, min(MaxScroll, Current + Delta)),
+    S1 = dui_redis_state:set_sub_scroll(State, New),
+    {dui_redis_state:set_sub_follow(S1, New >= MaxScroll), []}.
+
+-spec sub_visible(#dui_state{}) -> pos_integer().
+sub_visible(State) ->
+    {Rows, _} = dui_redis_state:size(State),
+    max(1, Rows - 6).
+
+-spec subscribe_view(#dui_state{}) -> #dui_node{}.
+subscribe_view(State) ->
+    Target = dui_redis_state:sub_target(State),
+    KindLabel = case dui_redis_state:sub_kind(State) of
+        channel -> <<"channel">>;
+        pattern -> <<"pattern">>
+    end,
+    Msgs = dui_redis_state:sub_messages(State),
+    Count = length(Msgs),
+    Visible = sub_visible(State),
+    Scroll = case dui_redis_state:sub_follow(State) of
+        true -> max(0, Count - Visible);
+        false -> min(dui_redis_state:sub_scroll(State), max(0, Count - Visible))
+    end,
+    Window = lists:sublist(Msgs, Scroll + 1, Visible),
+    Body = case Window of
+        [] ->
+            educkui_render_node:height(
+                educkui_render_node:text(<<"  (waiting for messages...)">>, dui_redis_theme:dim()),
+                Visible);
+        _ ->
+            educkui_render_node:height(
+                educkui_render_node:widget(educkui_widget_text_view, #{
+                    lines => [sub_line(M) || M <- Window]
+                }), Visible)
+    end,
+    Title = iolist_to_binary(io_lib:format("Subscribe  ~s  (~s, ~b)",
+        [Target, KindLabel, Count])),
+    Follow = case dui_redis_state:sub_follow(State) of
+        true -> <<"follow">>;
+        false -> <<"paused">>
+    end,
+    educkui_render_node:stack(vertical, [
+        screen_header(Title),
+        Body,
+        footer(<<" j/k scroll   c clear   ", Follow/binary, "   esc unsubscribe">>)
+    ]).
+
+-spec sub_line(map()) -> [{binary(), term()}].
+sub_line(#{channel := Channel, payload := Payload, at := At}) ->
+    [{format_time(At), dui_redis_theme:dim()},
+     {<<" [">>, dui_redis_theme:dim()},
+     {sanitize(Channel), dui_redis_theme:key_accent()},
+     {<<"] ">>, dui_redis_theme:dim()},
+     {sanitize(Payload), dui_redis_theme:normal()}].
+
+-spec format_time(calendar:datetime()) -> binary().
+format_time({{_, _, _}, {H, Mi, S}}) ->
+    iolist_to_binary(io_lib:format("~2..0b:~2..0b:~2..0b", [H, Mi, S])).
+
+-spec sanitize(binary()) -> binary().
+sanitize(Bin) when is_binary(Bin) ->
+    << <<(sanitize_byte(B))>> || <<B>> <= Bin >>;
+sanitize(_) ->
+    <<>>.
+
+-spec sanitize_byte(byte()) -> byte().
+sanitize_byte(B) when B >= 32, B =/= 127 -> B;
+sanitize_byte(_) -> 32.
+
 -spec displayed_pattern(#dui_state{}) -> binary().
 displayed_pattern(State) ->
     case dui_redis_state:filter_active(State) of
@@ -3169,7 +3355,7 @@ keys_hints(State) ->
         _ -> <<"  l more">>
     end,
     iolist_to_binary([" j/k nav   Enter view   / filter   s sort", More,
-                      "   r refresh   D db   esc disconnect   q quit", Loading]).
+                      "   r refresh   D db   ^P subscribe   esc disconnect   q quit", Loading]).
 
 %% -- shared -----------------------------------------------------------------
 
@@ -3237,6 +3423,15 @@ help_groups() ->
         {<<"Ctrl+S">>, <<"save">>},
         {<<"F2">>, <<"save (fallback)">>},
         {<<"Esc">>, <<"cancel">>}
+     ]},
+     {<<"Pub/Sub">>, [
+        {<<"Ctrl+P">>, <<"subscribe (channel/pattern)">>},
+        {<<"p">>, <<"list channels">>},
+        {<<"s">>, <<"subscribe to selected">>},
+        {<<"Enter">>, <<"publish (channels)">>},
+        {<<"j/k">>, <<"scroll / navigate">>},
+        {<<"c">>, <<"clear messages">>},
+        {<<"Esc">>, <<"unsubscribe">>}
      ]}].
 
 -spec help_column([{binary(), [{binary(), binary()}]}]) -> #dui_node{}.
