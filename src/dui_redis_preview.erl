@@ -44,6 +44,11 @@ lines(#{type := stream} = V, MaxLines) ->
     numbered(Items, MaxLines);
 lines(#{type := json} = V, MaxLines) ->
     text_lines(maps:get(text, V, <<>>), MaxLines);
+lines(#{type := protobuf} = V, MaxLines) ->
+    Header = case maps:get(decoded_format, V, <<"protobuf">>) of
+        F -> <<"[decoded ", F/binary, "]">>
+    end,
+    take(MaxLines, [Header | text_lines(maps:get(decoded, V, <<>>), MaxLines)]);
 lines(#{type := Type} = V, MaxLines) ->
     case maps:get(items, V, undefined) of
         L when is_list(L) -> numbered([to_bin(I) || I <- L], MaxLines);
@@ -74,6 +79,7 @@ type_label(stream) -> <<"stream">>;
 type_label(json) -> <<"json">>;
 type_label(hll) -> <<"hyperloglog">>;
 type_label(bitmap) -> <<"bitmap">>;
+type_label(protobuf) -> <<"protobuf">>;
 type_label(Other) -> atom_to_binary(Other, utf8).
 
 %% ---------------------------------------------------------------------------

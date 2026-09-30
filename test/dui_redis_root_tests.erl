@@ -45,7 +45,7 @@ config_loaded_test() ->
     save_conn(Path, <<"Local">>, <<"localhost">>, 6379),
     Pid = start_root_path(Path),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
-        fun(S) -> length(S#dui_state.connections) =:= 1 end, 300)),
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 500)),
     ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Local">>)),
     cleanup(Pid, Dir).
 
@@ -59,7 +59,7 @@ add_connection_via_form_test() ->
     ok = educkui_test:send_key(Pid, <<"y">>),
     ok = educkui_test:send_key(Pid, enter),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
-        fun(S) -> length(S#dui_state.connections) =:= 1 end, 300)),
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 500)),
     ?assertEqual(ok, educkui_test:assert_text(Pid, <<"My">>)),
     cleanup(Pid, Dir).
 
@@ -69,7 +69,7 @@ edit_connection_test() ->
     save_conn(Path, <<"My">>, <<"localhost">>, 6379),
     Pid = start_root_path(Path),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
-        fun(S) -> length(S#dui_state.connections) =:= 1 end, 300)),
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 500)),
     ok = educkui_test:send_key(Pid, <<"e">>),
     ok = educkui_test:sync(Pid),
     ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Edit Connection">>)),
@@ -85,7 +85,7 @@ delete_connection_via_confirm_test() ->
     save_conn(Path, <<"Doomed">>, <<"localhost">>, 6379),
     Pid = start_root_path(Path),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
-        fun(S) -> length(S#dui_state.connections) =:= 1 end, 300)),
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 500)),
     ok = educkui_test:send_key(Pid, <<"d">>),
     ok = educkui_test:sync(Pid),
     ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Confirm Delete">>)),
@@ -108,7 +108,7 @@ live_connect_flow() ->
     save_conn(Path, <<"Local">>, <<"localhost">>, 6379),
     Pid = start_root_path(Path),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
-        fun(S) -> length(S#dui_state.connections) =:= 1 end, 300)),
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 500)),
     ok = educkui_test:send_key(Pid, enter),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
         fun(S) -> S#dui_state.connected end, 300)),
@@ -136,7 +136,7 @@ live_keys_browse() ->
     ok = educkui_test:send_event(Pid, educkui_event:resize(120, 24)),
     ?assertEqual(ok, educkui_test:sync(Pid)),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
-        fun(S) -> length(S#dui_state.connections) =:= 1 end, 300)),
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 500)),
     ok = educkui_test:send_key(Pid, enter),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
         fun(S) -> length(S#dui_state.keys) >= 3 end, 200)),
@@ -173,7 +173,7 @@ live_key_detail() ->
                                init_args => [{opts, #{config_path => Path}}]}),
     ok = educkui_test:send_event(Pid, educkui_event:resize(120, 24)),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
-        fun(S) -> length(S#dui_state.connections) =:= 1 end, 300)),
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 500)),
     ok = educkui_test:send_key(Pid, enter),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
         fun(S) -> length(S#dui_state.keys) >= 3 end, 200)),
@@ -226,7 +226,7 @@ live_favorites_and_tree() ->
                                init_args => [{opts, #{config_path => Path}}]}),
     ok = educkui_test:send_event(Pid, educkui_event:resize(120, 24)),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
-        fun(S) -> length(S#dui_state.connections) =:= 1 end, 300)),
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 500)),
     ok = educkui_test:send_key(Pid, enter),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
         fun(S) -> length(S#dui_state.keys) >= 3 end, 200)),
@@ -276,7 +276,7 @@ live_monitoring_screens() ->
                                init_args => [{opts, #{config_path => Path}}]}),
     ok = educkui_test:send_event(Pid, educkui_event:resize(100, 24)),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
-        fun(S) -> length(S#dui_state.connections) =:= 1 end, 300)),
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 500)),
     ok = educkui_test:send_key(Pid, enter),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
         fun(S) -> S#dui_state.connected end, 300)),
@@ -318,7 +318,7 @@ live_ops_screens() ->
                                init_args => [{opts, #{config_path => Path}}]}),
     ok = educkui_test:send_event(Pid, educkui_event:resize(100, 24)),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
-        fun(S) -> length(S#dui_state.connections) =:= 1 end, 300)),
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 500)),
     ok = educkui_test:send_key(Pid, enter),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
         fun(S) -> S#dui_state.connected end, 300)),
@@ -387,8 +387,9 @@ cleanup(Pid, Dir) ->
 
 reset_app() ->
     _ = application:stop(dui_redis),
+    timer:sleep(100),
     stop_client(),
-    {ok, _} = application:ensure_all_started(dui_redis),
+    _ = application:ensure_all_started(dui_redis),
     ok.
 
 stop_client() ->

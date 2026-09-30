@@ -218,6 +218,26 @@ live_ops() ->
     ?assertMatch({error, _}, dui_redis_client:cluster_nodes()),
     ok = dui_redis_client:disconnect().
 
+live_protobuf_decode_test_() ->
+    case redis_available() of
+        true -> {timeout, 30, fun live_protobuf_decode/0};
+        false -> []
+    end.
+
+live_protobuf_decode() ->
+    ensure_client(),
+    ok = dui_redis_client:connect(#{host => <<"localhost">>, port => 6379, db => 0}),
+    {ok, _} = dui_redis_client:q([<<"FLUSHDB">>]),
+    Msg = <<8, 150, 1, 18, 2, "hi">>,
+    {ok, _} = dui_redis_client:set_string(<<"m7:pb">>, Msg, 0),
+    {ok, V} = dui_redis_client:value_preview(<<"m7:pb">>),
+    ?assertEqual(protobuf, maps:get(type, V)),
+    ?assert(binary:match(maps:get(decoded, V), <<"1: 150">>) =/= nomatch),
+    {ok, _} = dui_redis_client:set_string(<<"m7:json">>, <<"{\"a\":1}">>, 0),
+    {ok, JV} = dui_redis_client:value_preview(<<"m7:json">>),
+    ?assertEqual(true, maps:get(json, JV)),
+    ok = dui_redis_client:disconnect().
+
 %% ---------------------------------------------------------------------------
 
 ensure_client() ->

@@ -994,6 +994,7 @@ detail_key(State, Key, Mods) ->
         <<"x">> -> start_prompt(State, collection_remove);
         <<"J">> -> start_prompt(State, json_path);
         <<"F">> -> add_current_favorite(State);
+        <<"y">> -> copy_current_key(State);
         delete -> confirm_delete_key(State);
         backspace -> confirm_delete_key(State);
         _ -> {State, []}
@@ -1407,6 +1408,17 @@ add_current_favorite(State) ->
         KeyMap ->
             Key = maps:get(key, KeyMap),
             {State, [dui_redis_cmd:add_favorite(State, Key, <<>>)]}
+    end.
+
+-spec copy_current_key(#dui_state{}) -> {#dui_state{}, [educkui_command:command()]}.
+copy_current_key(State) ->
+    case dui_redis_state:current_key(State) of
+        undefined ->
+            {State, []};
+        KeyMap ->
+            Key = to_bin(maps:get(key, KeyMap, <<>>)),
+            _ = educkui_runtime:copy_to_clipboard(Key),
+            {dui_redis_state:set_status(State, info, <<"Copied to clipboard">>), []}
     end.
 
 %% -- results screen ---------------------------------------------------------
@@ -2106,16 +2118,9 @@ detail_view(State) ->
     Ttl = dui_redis_fmt:ttl_render(maps:get(ttl, KeyMap, -1)),
     Meta = <<"  type: ", (dui_redis_preview:type_label(Type))/binary,
              "   ttl: ", Ttl/binary>>,
-    ValueLines = case dui_redis_state:current_value(State) of
-        undefined -> [<<"loading...">>];
-        Value -> dui_redis_preview:lines(Value, 5000)
-    end,
     {Rows, _} = dui_redis_state:size(State),
     Visible = max(1, Rows - 8),
-    Scroll = min(dui_redis_state:detail_scroll(State),
-                 max(0, length(ValueLines) - 1)),
-    Window = lists:sublist(ValueLines, Scroll + 1, Visible),
-    LineNodes = [educkui_render_node:text(<<"  ", L/binary>>) || L <- Window],
+    LineNodes = value_line_nodes(dui_redis_state:current_value(State), Visible, State),
     educkui_render_node:stack(vertical, [
         educkui_render_node:text(<<" ", Name/binary>>, dui_redis_theme:title()),
         educkui_render_node:text(Meta, dui_redis_theme:subtitle()),
@@ -2123,6 +2128,36 @@ detail_view(State) ->
         | LineNodes] ++
         [footer(<<" e edit   a add   x remove   t ttl   R rename   c copy   d delete   r refresh   esc back">>)
     ]).
+
+%% @doc Builds the value body nodes, highlighting JSON values.
+-spec value_line_nodes(map() | undefined, pos_integer(), #dui_state{}) -> [#dui_node{}].
+value_line_nodes(undefined, _Visible, _State) ->
+    [educkui_render_node:text(<<"  loading...">>, dui_redis_theme:dim())];
+value_line_nodes(Value, Visible, State) ->
+    case json_text(Value) of
+        {true, Text} ->
+            json_line_nodes(Text, Visible, State);
+        false ->
+            ValueLines = dui_redis_preview:lines(Value, 5000),
+            Scroll = min(dui_redis_state:detail_scroll(State),
+                         max(0, length(ValueLines) - 1)),
+            Window = lists:sublist(ValueLines, Scroll + 1, Visible),
+            [educkui_render_node:text(<<"  ", L/binary>>) || L <- Window]
+    end.
+
+-spec json_text(map()) -> {true, binary()} | false.
+json_text(#{type := json, text := Text}) -> {true, Text};
+json_text(#{json := true, text := Text}) -> {true, Text};
+json_text(_) -> false.
+
+-spec json_line_nodes(binary(), pos_integer(), #dui_state{}) -> [#dui_node{}].
+json_line_nodes(Text, Visible, State) ->
+    JLines = dui_redis_json:lines(Text),
+    Scroll = min(dui_redis_state:detail_scroll(State), max(0, length(JLines) - 1)),
+    Window = lists:sublist(JLines, Scroll + 1, Visible),
+    [educkui_render_node:widget(educkui_widget_text_view, #{
+         lines => [[{<<"  ">>, undefined} | Spans]]
+     }) || Spans <- Window].
 
 -spec editor_view(#dui_state{}) -> #dui_node{}.
 editor_view(State) ->

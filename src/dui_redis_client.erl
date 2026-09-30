@@ -410,17 +410,22 @@ with_conn(_State, _Fun) ->
     {error, not_connected}.
 
 -spec do_connect(map(), map()) -> {reply, ok | {error, term()}, map()}.
-do_connect(Conn, State) ->
-    case start_eredis(build_options(Conn)) of
-        {ok, Pid} ->
-            case eredis:q(Pid, [<<"PING">>]) of
-                {ok, <<"PONG">>} ->
-                    {reply, ok, State#{conn => Pid, conn_config => Conn}};
-                {ok, Other} ->
-                    _ = safe_stop(Pid),
-                    {reply, {error, {unexpected_reply, Other}}, State};
+do_connect(Conn0, State) ->
+    case dui_redis_vault:maybe_resolve(Conn0) of
+        {ok, Conn} ->
+            case start_eredis(build_options(Conn)) of
+                {ok, Pid} ->
+                    case eredis:q(Pid, [<<"PING">>]) of
+                        {ok, <<"PONG">>} ->
+                            {reply, ok, State#{conn => Pid, conn_config => Conn}};
+                        {ok, Other} ->
+                            _ = safe_stop(Pid),
+                            {reply, {error, {unexpected_reply, Other}}, State};
+                        {error, Reason} ->
+                            _ = safe_stop(Pid),
+                            {reply, {error, Reason}, State}
+                    end;
                 {error, Reason} ->
-                    _ = safe_stop(Pid),
                     {reply, {error, Reason}, State}
             end;
         {error, Reason} ->
@@ -428,7 +433,14 @@ do_connect(Conn, State) ->
     end.
 
 -spec do_test(map()) -> {ok, non_neg_integer()} | {error, term()}.
-do_test(Conn) ->
+do_test(Conn0) ->
+    case dui_redis_vault:maybe_resolve(Conn0) of
+        {ok, Conn} -> do_test_resolved(Conn);
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec do_test_resolved(map()) -> {ok, non_neg_integer()} | {error, term()}.
+do_test_resolved(Conn) ->
     Start = erlang:monotonic_time(millisecond),
     case start_eredis(build_options(Conn)) of
         {ok, Pid} ->
@@ -571,7 +583,11 @@ detect_string_subtypes(Pid, Keys) ->
 maybe_string_subtype(#{type := string, key := Name} = K, Probing) ->
     case maps:get(Name, Probing, undefined) of
         undefined -> K;
-        Bin -> K#{type => dui_redis_type:detect_string_subtype(Bin)}
+        Bin ->
+            case dui_redis_decode:looks_like_protobuf(Bin) of
+                true -> K#{type => protobuf};
+                false -> K#{type => dui_redis_type:detect_string_subtype(Bin)}
+            end
     end;
 maybe_string_subtype(K, _Probing) ->
     K.
@@ -666,12 +682,26 @@ fetch_string(Pid, Key, MaxBytes) ->
     case eredis:q(Pid, [<<"GETRANGE">>, Key, <<"0">>, integer_to_binary(MaxBytes - 1)]) of
         {ok, Bin} ->
             Truncated = Total > byte_size(Bin),
-            Type = dui_redis_type:detect_string_subtype(Bin),
-            Base = #{type => Type, truncated => Truncated, total => Total, text => Bin},
-            case Type of
-                hll -> {ok, Base#{count => to_int(q_val(Pid, [<<"PFCOUNT">>, Key]), 0)}};
-                bitmap -> {ok, Base#{bitcount => to_int(q_val(Pid, [<<"BITCOUNT">>, Key]), 0)}};
-                _ -> {ok, Base}
+            Base = #{truncated => Truncated, total => Total, text => Bin,
+                     json => looks_like_json(Bin)},
+            case dui_redis_type:detect_string_subtype(Bin) of
+                hll ->
+                    {ok, Base#{type => hll,
+                               count => to_int(q_val(Pid, [<<"PFCOUNT">>, Key]), 0)}};
+                bitmap ->
+                    case dui_redis_decode:try_binary(Bin) of
+                        {ok, Decoded} ->
+                            {ok, Base#{type => protobuf,
+                                       decoded => maps:get(text, Decoded),
+                                       decoded_format => maps:get(format, Decoded),
+                                       raw_size => maps:get(raw_size, Decoded),
+                                       decoded_size => maps:get(decoded_size, Decoded)}};
+                        not_binary ->
+                            {ok, Base#{type => bitmap,
+                                       bitcount => to_int(q_val(Pid, [<<"BITCOUNT">>, Key]), 0)}}
+                    end;
+                string ->
+                    {ok, Base#{type => string}}
             end;
         {error, Reason} ->
             {error, Reason}
@@ -1272,6 +1302,19 @@ q_val(Pid, Cmd) ->
         {ok, V} -> V;
         _ -> undefined
     end.
+
+%% @doc True if `Bin' is a JSON object or array.
+-spec looks_like_json(binary()) -> boolean().
+looks_like_json(<<>>) -> false;
+looks_like_json(<<C, _/binary>> = Bin) when C =:= ${; C =:= $[ ->
+    try json:decode(Bin) of
+        M when is_map(M) -> true;
+        L when is_list(L) -> true;
+        _ -> false
+    catch
+        _:_ -> false
+    end;
+looks_like_json(_) -> false.
 
 -spec pair_up([term()]) -> [{term(), term()}].
 pair_up([A, B | Rest]) -> [{A, B} | pair_up(Rest)];
