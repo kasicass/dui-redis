@@ -60,6 +60,112 @@ monitor_list_scrolls_test() ->
     ?assertEqual(ok, educkui_test:assert_text(Pid, <<"g25">>)),
     cleanup(Pid, Dir).
 
+%% @doc Renders every screen with representative data (no Redis needed) so a
+%% crashing view function is caught.
+render_all_screens_test() ->
+    Dir = mk_tmp(),
+    Path = filename:join(Dir, "config.json"),
+    Pid = educkui_test:start(#{root => dui_redis_root, size => {30, 100},
+                               init_args => [{opts, #{config_path => Path}}]}),
+    ok = educkui_test:send_event(Pid, educkui_event:resize(100, 30)),
+    lists:foreach(
+        fun({Name, Actions}) ->
+            lists:foreach(fun(A) -> ok = run_action(Pid, A) end, Actions),
+            Expected = expected_screen(Name),
+            ?assertEqual(ok, educkui_test:wait_until(Pid,
+                fun(S) -> S#dui_state.screen =:= Expected end, 100)),
+            _ = educkui_test:screen_text(Pid),
+            ?assert(is_process_alive(Pid))
+        end,
+        render_steps()),
+    cleanup(Pid, Dir).
+
+run_action(Pid, {msg, Msg}) -> educkui_test:send_msg(Pid, Msg);
+run_action(Pid, {key, Key}) -> educkui_test:send_key(Pid, Key).
+
+expected_screen(connections) -> connections;
+expected_screen(connection_form) -> connection_form;
+expected_screen(test_connection) -> test_connection;
+expected_screen(confirm_delete) -> confirm_delete;
+expected_screen(keys) -> keys;
+expected_screen(detail_string) -> key_detail;
+expected_screen(detail_json) -> key_detail;
+expected_screen(detail_list) -> key_detail;
+expected_screen(detail_hash) -> key_detail;
+expected_screen(editor) -> edit_value;
+expected_screen(prompt) -> prompt;
+expected_screen(results) -> results;
+expected_screen(tree) -> tree;
+expected_screen(result_text) -> result_text;
+expected_screen(switch_db) -> switch_db;
+expected_screen(server_info) -> server_info;
+expected_screen(slow_log) -> slow_log;
+expected_screen(client_list) -> client_list;
+expected_screen(memory_stats) -> memory_stats;
+expected_screen(live_metrics) -> live_metrics;
+expected_screen(expiring) -> expiring_keys;
+expected_screen(channels) -> pubsub_channels;
+expected_screen(redis_config) -> redis_config;
+expected_screen(cluster) -> cluster_info;
+expected_screen(groups) -> groups;
+expected_screen(logs) -> logs;
+expected_screen(help) -> logs.
+
+render_steps() ->
+    Conn = #{id => 1, name => <<"Local">>, host => <<"localhost">>, port => 6379,
+             db => 0, username => <<>>, password => <<>>,
+             use_cluster => false, use_tls => false},
+    Connected = {connected, ok},
+    Keys = {keys_loaded, 0, {ok, #{keys => [#{key => <<"user:1">>, type => string, ttl => -1},
+                                           #{key => <<"sess:a">>, type => hash, ttl => 60}],
+                                    cursor => 0, total => 2}}},
+    Str = {detail_loaded, <<"user:1">>, {ok, #{type => string, text => <<"hello">>}}},
+    Json = {detail_loaded, <<"user:1">>,
+            {ok, #{type => json, text => <<"{\"a\":1,\"b\":[2,3]}">>}}},
+    List = {detail_loaded, <<"user:1">>, {ok, #{type => list, items => [<<"a">>, <<"b">>]}}},
+    Hash = {detail_loaded, <<"user:1">>,
+            {ok, #{type => hash, items => [{<<"f">>, <<"v">>}]}}},
+    [
+        {connections, [{msg, {connections_loaded, {ok, [Conn]}}}]},
+        {connection_form, [{msg, {disconnected, ok}}, {key, <<"a">>}]},
+        {test_connection, [{msg, {connection_tested, {ok, 5}}}]},
+        {confirm_delete, [{msg, {disconnected, ok}},
+                         {msg, {connections_loaded, {ok, [Conn]}}}, {key, <<"d">>}]},
+        {keys, [{msg, Connected}, {msg, Keys}]},
+        {detail_string, [{msg, Str}]},
+        {detail_json, [{msg, Json}]},
+        {detail_list, [{msg, List}]},
+        {detail_hash, [{msg, Hash}]},
+        {editor, [{msg, Str}, {key, <<"e">>}]},
+        {prompt, [{msg, Str}, {key, <<"t">>}]},
+        {results, [{msg, {favorites_loaded,
+            {ok, [#{key => <<"user:1">>, label => <<"L">>, type => string}]}}}]},
+        {tree, [{msg, Connected}, {msg, Keys}, {key, <<"W">>}]},
+        {result_text, [{msg, {lua_result, {ok, <<"return 1">>}}}]},
+        {switch_db, [{msg, Connected}, {key, <<"D">>}]},
+        {server_info, [{msg, {server_info_loaded,
+            {ok, #{version => <<"7">>, mode => <<"standalone">>}}}}]},
+        {slow_log, [{msg, {slow_log_loaded,
+            {ok, [#{id => 1, duration => 5, command => <<"GET">>}]}}}]},
+        {client_list, [{msg, {clients_loaded,
+            {ok, [#{id => 1, addr => <<"1:1">>, age => 1, db => 0, cmd => <<"get">>}]}}}]},
+        {memory_stats, [{msg, {memory_stats_loaded, {ok, #{
+            used => <<"1K">>, peak => <<"2K">>, rss => <<"1K">>,
+            frag_ratio => <<"1.10">>, frag_bytes => <<"0">>, lua => <<"0">>,
+            top_keys => [#{key => <<"k">>, type => string, size => 10}]}}}}]},
+        {live_metrics, [{msg, Connected}, {key, <<"m">>},
+            {msg, {live_metrics_loaded, {ok, #{ops => 1, clients => 1, blocked => 0,
+                hits => 1, misses => 0, used_memory => 1024}}}}]},
+        {expiring, [{msg, {expiring_loaded, {ok, [#{key => <<"k">>, ttl => 30}]}}}]},
+        {channels, [{msg, {channels_loaded, {ok, [<<"news">>]}}}]},
+        {redis_config, [{msg, {redis_config_loaded, {ok, #{<<"maxmemory">> => <<"0">>}}}}]},
+        {cluster, [{msg, {cluster_loaded, {ok, [#{role => <<"master">>, addr => <<"1">>,
+            slots => [<<"0-1">>]}]}}}]},
+        {groups, [{msg, {groups_loaded, {ok, [#{name => <<"prod">>, connections => [1]}]}}}]},
+        {logs, [{msg, Connected}, {key, <<"O">>}]},
+        {help, [{key, <<"?">>}]}
+    ].
+
 initial_resize_delivered_test() ->
     {Pid, Dir} = start_root(),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
@@ -451,7 +557,8 @@ redis_available() ->
     end.
 
 mk_tmp() ->
-    Dir = filename:join("/tmp", "dui_redis_root_test_"
+    Dir = filename:join("/tmp", "dui_redis_root_test_" ++ os:getpid() ++ "_"
                         ++ integer_to_list(erlang:unique_integer([positive]))),
+    _ = file:del_dir_r(Dir),
     ok = filelib:ensure_dir(filename:join(Dir, "x")),
     Dir.

@@ -2078,6 +2078,8 @@ gauge_row(Value, Width, FillStyle) ->
 %% @doc Selects the list row under a mouse click, per screen.
 -spec mouse_select(#dui_state{}, integer(), integer()) ->
     {#dui_state{}, [educkui_command:command()]}.
+mouse_select(#dui_state{show_help = true} = State, _X, _Y) ->
+    {State, []};
 mouse_select(#dui_state{screen = connections} = State, _X, Y) ->
     Top = 10 + connection_error_count(State),
     case list_index(Y, Top, connections_visible(State),
@@ -2132,6 +2134,8 @@ mouse_select(State, _X, _Y) ->
 %% @doc Scrolls the active list with the mouse wheel.
 -spec mouse_scroll(#dui_state{}, up | down) ->
     {#dui_state{}, [educkui_command:command()]}.
+mouse_scroll(#dui_state{show_help = true} = State, _Dir) ->
+    {State, []};
 mouse_scroll(State, up) -> scroll_select(State, -3);
 mouse_scroll(State, down) -> scroll_select(State, 3).
 

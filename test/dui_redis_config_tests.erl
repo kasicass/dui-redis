@@ -124,8 +124,9 @@ binary_path_test() ->
 %% ---------------------------------------------------------------------------
 
 mk_tmp() ->
-    Dir = filename:join("/tmp", "dui_redis_test_"
+    Dir = filename:join("/tmp", "dui_redis_test_" ++ os:getpid() ++ "_"
                         ++ integer_to_list(erlang:unique_integer([positive]))),
+    _ = file:del_dir_r(Dir),
     ok = filelib:ensure_dir(filename:join(Dir, "x")),
     Dir.
 
