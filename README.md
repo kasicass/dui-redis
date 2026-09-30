@@ -9,17 +9,17 @@ A Redis terminal UI manager built with [educkui](https://github.com/kasicass/edu
 
 ## Status
 
-**M1 — connection management** (done). Currently implemented:
+**M2 — key browsing and preview** (done). Currently implemented:
 
 - educkui runtime integration (root Elm component, help overlay, status bar)
 - CLI parsing via OTP `argparse` (redis-cli style flags)
 - JSON configuration at `~/.config/dui-redis/config.json` (secrets stripped)
 - connection manager: list, add/edit form, test connection, delete confirmation
 - connect/disconnect against Redis via `eredis`; auto-connect from `--host`
-- proof-of-life for runtime features: async command results, 1 Hz interval,
-  resize delivery
+- key browser: table (key/type/TTL), live filter, sort, paging, switch DB
+- bounded value preview (100 items / 64 KB) with HLL/bitmap/geo detection
 
-Keys/browse/edit/monitor features arrive in later milestones (M2+).
+Key editing/monitoring features arrive in later milestones (M3+).
 
 ## Requirements
 
