@@ -9,15 +9,17 @@ A Redis terminal UI manager built with [educkui](https://github.com/kasicass/edu
 
 ## Status
 
-**M0 — skeleton** (in progress). Currently implemented:
+**M1 — connection management** (done). Currently implemented:
 
 - educkui runtime integration (root Elm component, help overlay, status bar)
 - CLI parsing via OTP `argparse` (redis-cli style flags)
 - JSON configuration at `~/.config/dui-redis/config.json` (secrets stripped)
+- connection manager: list, add/edit form, test connection, delete confirmation
+- connect/disconnect against Redis via `eredis`; auto-connect from `--host`
 - proof-of-life for runtime features: async command results, 1 Hz interval,
   resize delivery
 
-Keys/browse/edit/monitor features arrive in later milestones (M1+).
+Keys/browse/edit/monitor features arrive in later milestones (M2+).
 
 ## Requirements
 
@@ -31,6 +33,11 @@ Dependencies are declared in `rebar.config`:
 - `eredis` — hex
 
 ## Build and run
+
+> **Local dev note**: until the educkui cursor-optimizer fix (commit `9818028`) is on
+> `github.com/kasicass/educkui`, this repo uses `_checkouts/educkui` (a gitignored
+> symlink to `../tui/educkui`) so the local educkui is used. Once pushed, remove
+> `_checkouts/` and run `rebar3 upgrade educkui` to refresh `rebar.lock`.
 
 ```bash
 rebar3 compile
