@@ -65,6 +65,62 @@ invalid_json_test() ->
     ?assertMatch({error, {invalid_config, _}}, dui_redis_config:load(Path)),
     cleanup(Dir).
 
+add_list_update_delete_test() ->
+    Dir = mk_tmp(),
+    Path = filename:join(Dir, "config.json"),
+    ?assertEqual({ok, []}, dui_redis_config:list_connections(Path)),
+    {ok, Added} = dui_redis_config:add_connection(Path,
+        #{name => <<"Local">>, host => <<"localhost">>, port => 6379, db => 0}),
+    ?assertEqual(1, maps:get(id, Added)),
+    ?assertNotEqual(undefined, maps:get(created_at, Added)),
+    {ok, Conns} = dui_redis_config:list_connections(Path),
+    ?assertEqual(1, length(Conns)),
+    ?assertEqual(<<"Local">>, maps:get(name, hd(Conns))),
+
+    %% second add gets the next id
+    {ok, Added2} = dui_redis_config:add_connection(Path,
+        #{name => <<"Prod">>, host => <<"prod">>, port => 6380}),
+    ?assertEqual(2, maps:get(id, Added2)),
+
+    %% update preserves id and created_at
+    {ok, Updated} = dui_redis_config:update_connection(Path,
+        Added#{name => <<"Local Renamed">>}),
+    ?assertEqual(1, maps:get(id, Updated)),
+    ?assertEqual(maps:get(created_at, Added), maps:get(created_at, Updated)),
+    {ok, Conns2} = dui_redis_config:list_connections(Path),
+    Names = [maps:get(name, C) || C <- Conns2],
+    ?assert(lists:member(<<"Local Renamed">>, Names)),
+
+    %% delete
+    ok = dui_redis_config:delete_connection(Path, 1),
+    {ok, Conns3} = dui_redis_config:list_connections(Path),
+    ?assertEqual(1, length(Conns3)),
+    ?assertEqual(<<"Prod">>, maps:get(name, hd(Conns3))),
+    ?assertEqual({error, not_found}, dui_redis_config:delete_connection(Path, 99)),
+    ?assertEqual({error, not_found}, dui_redis_config:update_connection(Path,
+        #{id => 99, name => <<"x">>})),
+    cleanup(Dir).
+
+add_strips_password_on_disk_test() ->
+    Dir = mk_tmp(),
+    Path = filename:join(Dir, "config.json"),
+    {ok, _} = dui_redis_config:add_connection(Path,
+        #{name => <<"C">>, host => <<"h">>, password => <<"topsecret">>}),
+    {ok, Bin} = file:read_file(Path),
+    ?assertEqual(nomatch, binary:match(Bin, <<"topsecret">>)),
+    cleanup(Dir).
+
+binary_path_test() ->
+    %% CLI passes the config path as a binary; CRUD must accept it.
+    Dir = mk_tmp(),
+    Path = list_to_binary(filename:join(Dir, "config.json")),
+    {ok, Added} = dui_redis_config:add_connection(Path,
+        #{name => <<"Bin">>, host => <<"localhost">>}),
+    ?assertEqual(1, maps:get(id, Added)),
+    {ok, Conns} = dui_redis_config:list_connections(Path),
+    ?assertEqual(1, length(Conns)),
+    cleanup(Dir).
+
 %% ---------------------------------------------------------------------------
 
 mk_tmp() ->

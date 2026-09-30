@@ -11,4 +11,11 @@ start_link() ->
 
 -spec init([]) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init([]) ->
-    {ok, {#{strategy => one_for_one, intensity => 5, period => 10}, []}}.
+    SupFlags = #{strategy => one_for_one, intensity => 5, period => 10},
+    Client = #{id => dui_redis_client,
+               start => {dui_redis_client, start_link, []},
+               restart => permanent,
+               shutdown => 5000,
+               type => worker,
+               modules => [dui_redis_client]},
+    {ok, {SupFlags, [Client]}}.

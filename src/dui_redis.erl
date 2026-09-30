@@ -33,10 +33,13 @@ run(Args) ->
 
 -spec start(map()) -> ok | {error, term()}.
 start(Opts) ->
-    educkui:run([
+    {ok, _Started} = application:ensure_all_started(dui_redis),
+    Result = educkui:run([
         {root, dui_redis_root},
         {init_args, [{opts, Opts}]}
-    ]).
+    ]),
+    _ = application:stop(dui_redis),
+    Result.
 
 %% @doc Returns the application version string.
 -spec version() -> string().

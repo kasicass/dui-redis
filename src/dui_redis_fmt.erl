@@ -11,6 +11,9 @@
 %% @doc Human-readable screen name.
 -spec screen_name(atom()) -> binary().
 screen_name(connections) -> <<"Connections">>;
+screen_name(connection_form) -> <<"Connection">>;
+screen_name(test_connection) -> <<"Test Connection">>;
+screen_name(confirm_delete) -> <<"Confirm Delete">>;
 screen_name(keys) -> <<"Keys">>;
 screen_name(key_detail) -> <<"Key Detail">>;
 screen_name(help) -> <<"Help">>;

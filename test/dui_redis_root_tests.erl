@@ -7,21 +7,20 @@ skeleton_renders_test() ->
     {Pid, Dir} = start_root(),
     ?assertEqual(ok, educkui_test:assert_text(Pid, <<"dui-redis">>)),
     ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Connections">>)),
-    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"no saved connections">>)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"No connections saved">>)),
     cleanup(Pid, Dir).
 
 help_toggle_test() ->
     {Pid, Dir} = start_root(),
     ok = educkui_test:send_key(Pid, <<"?">>),
-    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Global shortcuts">>)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"toggle this help">>)),
     ok = educkui_test:send_key(Pid, esc),
     ok = educkui_test:sync(Pid),
-    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"no saved connections">>)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"No connections saved">>)),
     cleanup(Pid, Dir).
 
 initial_resize_delivered_test() ->
     {Pid, Dir} = start_root(),
-    %% educkui delivers the initial size to the root component (E2).
     ?assertEqual(ok, educkui_test:wait_until(Pid,
         fun(S) -> S#dui_state.size =:= {24, 80} end, 50)),
     cleanup(Pid, Dir).
@@ -42,32 +41,113 @@ interval_tick_test() ->
 config_loaded_test() ->
     Dir = mk_tmp(),
     Path = filename:join(Dir, "config.json"),
-    ok = dui_redis_config:save(Path, #{
-        connections => [#{id => 1, name => <<"Local">>, host => <<"localhost">>,
-                          port => 6379}],
-        favorites => [], recent_keys => [], templates => [],
-        tree_separator => <<":">>, max_recent_keys => 20,
-        max_value_history => 50, watch_interval_ms => 1000}),
-    Pid = educkui_test:start(#{root => dui_redis_root, size => {24, 80},
-                               init_args => [{opts, #{config_path => Path}}]}),
+    save_conn(Path, <<"Local">>, <<"localhost">>, 6379),
+    Pid = start_root_path(Path),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
         fun(S) -> length(S#dui_state.connections) =:= 1 end, 100)),
-    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Local (localhost:6379)">>)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Local">>)),
     cleanup(Pid, Dir).
+
+add_connection_via_form_test() ->
+    {Pid, Dir} = start_root(),
+    ok = educkui_test:wait_until(Pid, fun(S) -> S#dui_state.loading =:= false end, 100),
+    ok = educkui_test:send_key(Pid, <<"a">>),
+    ok = educkui_test:sync(Pid),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Add Connection">>)),
+    ok = educkui_test:send_key(Pid, <<"M">>),
+    ok = educkui_test:send_key(Pid, <<"y">>),
+    ok = educkui_test:send_key(Pid, enter),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 100)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"My">>)),
+    cleanup(Pid, Dir).
+
+edit_connection_test() ->
+    Dir = mk_tmp(),
+    Path = filename:join(Dir, "config.json"),
+    save_conn(Path, <<"My">>, <<"localhost">>, 6379),
+    Pid = start_root_path(Path),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 100)),
+    ok = educkui_test:send_key(Pid, <<"e">>),
+    ok = educkui_test:sync(Pid),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Edit Connection">>)),
+    ok = educkui_test:send_key(Pid, <<"X">>),
+    ok = educkui_test:send_key(Pid, enter),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> [maps:get(name, C) || C <- S#dui_state.connections] =:= [<<"MyX">>] end, 100)),
+    cleanup(Pid, Dir).
+
+delete_connection_via_confirm_test() ->
+    Dir = mk_tmp(),
+    Path = filename:join(Dir, "config.json"),
+    save_conn(Path, <<"Doomed">>, <<"localhost">>, 6379),
+    Pid = start_root_path(Path),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 100)),
+    ok = educkui_test:send_key(Pid, <<"d">>),
+    ok = educkui_test:sync(Pid),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Confirm Delete">>)),
+    ok = educkui_test:send_key(Pid, <<"y">>),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.connections =:= [] end, 100)),
+    cleanup(Pid, Dir).
+
+live_connect_flow_test_() ->
+    case redis_available() of
+        true -> {timeout, 40, fun live_connect_flow/0};
+        false -> []
+    end.
+
+live_connect_flow() ->
+    stop_client(),
+    {ok, _} = application:ensure_all_started(dui_redis),
+    Dir = mk_tmp(),
+    Path = filename:join(Dir, "config.json"),
+    save_conn(Path, <<"Local">>, <<"localhost">>, 6379),
+    Pid = start_root_path(Path),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> length(S#dui_state.connections) =:= 1 end, 100)),
+    ok = educkui_test:send_key(Pid, enter),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.connected end, 300)),
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"Connected to Local">>)),
+    cleanup(Pid, Dir),
+    _ = application:stop(dui_redis),
+    ok.
 
 %% ---------------------------------------------------------------------------
 
 start_root() ->
     Dir = mk_tmp(),
     Path = filename:join(Dir, "config.json"),
-    Pid = educkui_test:start(#{root => dui_redis_root, size => {24, 80},
-                               init_args => [{opts, #{config_path => Path}}]}),
-    {Pid, Dir}.
+    {start_root_path(Path), Dir}.
+
+start_root_path(Path) ->
+    educkui_test:start(#{root => dui_redis_root, size => {24, 80},
+                         init_args => [{opts, #{config_path => Path}}]}).
+
+save_conn(Path, Name, Host, Port) ->
+    {ok, _} = dui_redis_config:add_connection(Path,
+        #{name => Name, host => Host, port => Port}),
+    ok.
 
 cleanup(Pid, Dir) ->
     ok = educkui_test:stop(Pid),
     _ = file:del_dir_r(Dir),
     ok.
+
+stop_client() ->
+    case whereis(dui_redis_client) of
+        undefined -> ok;
+        Pid -> catch gen_server:stop(Pid), ok
+    end.
+
+redis_available() ->
+    case gen_tcp:connect("127.0.0.1", 6379, [binary, {active, false}], 300) of
+        {ok, Sock} -> gen_tcp:close(Sock), true;
+        {error, _} -> false
+    end.
 
 mk_tmp() ->
     Dir = filename:join("/tmp", "dui_redis_root_test_"
