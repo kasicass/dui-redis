@@ -2722,14 +2722,15 @@ lines_view(State, Title, Header, Lines, Hints) ->
     end,
     Visible = max(1, Rows - 6 - HeaderLines),
     {Offset, _} = educkui_widget_list:visible_range(Count, Selected, Visible),
-    Body = case Lines of
+    Window = lists:sublist(Lines, Offset + 1, Visible),
+    Body = case Window of
         [] ->
             educkui_render_node:height(
                 educkui_render_node:text(<<"  (none)">>, dui_redis_theme:dim()), Visible);
         _ ->
             educkui_render_node:height(
                 educkui_render_node:widget(educkui_widget_list, #{
-                    items => Lines,
+                    items => Window,
                     selected => Selected - Offset,
                     offset => 0,
                     style => educkui_style:new(),

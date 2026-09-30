@@ -42,6 +42,24 @@ mouse_click_selects_connection_test() ->
         fun(S) -> S#dui_state.selected =:= 1 end, 100)),
     cleanup(Pid, Dir).
 
+monitor_list_scrolls_test() ->
+    Dir = mk_tmp(),
+    Path = filename:join(Dir, "config.json"),
+    write_groups(Path, 30),
+    Pid = educkui_test:start(#{root => dui_redis_root, size => {24, 80},
+                               init_args => [{opts, #{config_path => Path}}]}),
+    ok = educkui_test:send_event(Pid, educkui_event:resize(80, 24)),
+    ok = educkui_test:send_key(Pid, <<"g">>),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.screen =:= groups
+                  andalso length(S#dui_state.groups) =:= 30 end, 300)),
+    ok = educkui_test:send_keys(Pid, lists:duplicate(25, <<"j">>)),
+    ?assertEqual(ok, educkui_test:wait_until(Pid,
+        fun(S) -> S#dui_state.row_selected =:= 25 end, 100)),
+    %% The list must scroll so later rows are actually rendered.
+    ?assertEqual(ok, educkui_test:assert_text(Pid, <<"g25">>)),
+    cleanup(Pid, Dir).
+
 initial_resize_delivered_test() ->
     {Pid, Dir} = start_root(),
     ?assertEqual(ok, educkui_test:wait_until(Pid,
@@ -381,6 +399,12 @@ start_root() ->
 start_root_path(Path) ->
     educkui_test:start(#{root => dui_redis_root, size => {24, 80},
                          init_args => [{opts, #{config_path => Path}}]}).
+
+write_groups(Path, N) ->
+    Groups = [#{name => iolist_to_binary(io_lib:format("g~2..0b", [I])),
+                color => <<>>, connections => []} || I <- lists:seq(1, N)],
+    ok = dui_redis_config:save(Path, (dui_redis_config:defaults())#{groups => Groups}),
+    ok.
 
 save_conn(Path, Name, Host, Port) ->
     {ok, _} = dui_redis_config:add_connection(Path,
