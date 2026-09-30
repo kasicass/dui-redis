@@ -9,7 +9,7 @@ A Redis terminal UI manager built with [educkui](https://github.com/kasicass/edu
 
 ## Status
 
-**M3 — key detail and editing** (done). Currently implemented:
+**M4 — search, favorites, recent, tree** (done). Currently implemented:
 
 - educkui runtime integration (root Elm component, help overlay, status bar)
 - CLI parsing via OTP `argparse` (redis-cli style flags)
@@ -20,9 +20,11 @@ A Redis terminal UI manager built with [educkui](https://github.com/kasicass/edu
 - bounded value preview (100 items / 64 KB) with HLL/bitmap/geo detection
 - key detail screen with metadata and value; string/JSON editing (Ctrl+S/F2)
 - rename/copy/TTL/delete, flush DB, and add/remove collection items
+- regex / fuzzy / search-by-value, compare keys, JSONPath
+- favorites, recent keys and key templates (persisted); prefix tree view
 - in-memory value history
 
-Search/monitoring/admin features arrive in later milestones (M4+).
+Monitoring/admin features arrive in later milestones (M5+).
 
 ## Requirements
 
