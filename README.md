@@ -9,7 +9,7 @@ A Redis terminal UI manager built with [educkui](https://github.com/kasicass/edu
 
 ## Status
 
-**M4 — search, favorites, recent, tree** (done). Currently implemented:
+**M5 — monitoring** (done). Currently implemented:
 
 - educkui runtime integration (root Elm component, help overlay, status bar)
 - CLI parsing via OTP `argparse` (redis-cli style flags)
@@ -23,8 +23,10 @@ A Redis terminal UI manager built with [educkui](https://github.com/kasicass/edu
 - regex / fuzzy / search-by-value, compare keys, JSONPath
 - favorites, recent keys and key templates (persisted); prefix tree view
 - in-memory value history
+- monitoring: server info, slow log, clients, memory stats, live metrics
+  (gauge + sparklines), expiring keys, logs
 
-Monitoring/admin features arrive in later milestones (M5+).
+Admin/ops features arrive in later milestones (M6+).
 
 ## Requirements
 
