@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="864" height="602" viewBox="0 0 864 602" font-family="Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="14">
+<rect width="864" height="602" fill="#1e1e1e"/>
+<text x="12.0" y="25.0" fill="#00afff" font-weight="bold" xml:space="preserve"> dui-redis 0.1.0  |  localhost:6379</text>
+<text x="306.0" y="25.0" fill="#00afff" font-weight="normal" xml:space="preserve">         </text>
+<text x="12.0" y="42.0" fill="#00afff" font-weight="bold" xml:space="preserve">Keys - localhost:6379  [Total: 7]</text>
+<text x="289.2" y="42.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">                                       </text>
+<text x="616.8" y="42.0" fill="#585858" font-weight="normal" xml:space="preserve">│ </text>
+<text x="633.6" y="42.0" fill="#00afff" font-weight="bold" xml:space="preserve">Preview</text>
+<text x="12.0" y="59.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">                                                                        </text>
+<text x="616.8" y="59.0" fill="#585858" font-weight="normal" xml:space="preserve">│ </text>
+<text x="633.6" y="59.0" fill="#008000" font-weight="bold" xml:space="preserve">string</text>
+<text x="12.0" y="76.0" fill="#008080" font-weight="bold" xml:space="preserve">Filter: </text>
+<text x="79.2" y="76.0" fill="#ffffff" font-weight="normal" xml:space="preserve">*                   </text>
+<text x="247.2" y="76.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">                                            </text>
+<text x="616.8" y="76.0" fill="#585858" font-weight="normal" xml:space="preserve">│</text>
+<text x="12.0" y="93.0" fill="#585858" font-weight="normal" xml:space="preserve">                             </text>
+<text x="255.6" y="93.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">                                           </text>
+<text x="616.8" y="93.0" fill="#585858" font-weight="normal" xml:space="preserve">│ </text>
+<text x="633.6" y="93.0" fill="#585858" font-weight="normal" xml:space="preserve">{</text>
+<text x="642.0" y="93.0" fill="#585858" font-weight="normal" xml:space="preserve">"enabled"</text>
+<text x="717.6" y="93.0" fill="#585858" font-weight="normal" xml:space="preserve">:</text>
+<text x="726.0" y="93.0" fill="#585858" font-weight="normal" xml:space="preserve">true</text>
+<text x="759.6" y="93.0" fill="#585858" font-weight="normal" xml:space="preserve">,</text>
+<text x="768.0" y="93.0" fill="#585858" font-weight="normal" xml:space="preserve">"limit"</text>
+<text x="826.8" y="93.0" fill="#585858" font-weight="normal" xml:space="preserve">:</text>
+<text x="835.2" y="93.0" fill="#585858" font-weight="normal" xml:space="preserve">5</text>
+<text x="843.6" y="93.0" fill="#585858" font-weight="normal" xml:space="preserve">}</text>
+<text x="12.0" y="110.0" fill="#ffffff" font-weight="bold" xml:space="preserve">  Key                                                  Type          TTL</text>
+<text x="12.0" y="127.0" fill="#8a8a8a" font-weight="normal" xml:space="preserve">────────────────────────────────────────────────────────────────────────</text>
+<rect x="12.0" y="131" width="445.2" height="17" fill="#00afff"/>
+<text x="12.0" y="144.0" fill="#000000" font-weight="bold" xml:space="preserve">▶ cfg:feature                                        </text>
+<text x="457.2" y="144.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">  </text>
+<text x="474.0" y="144.0" fill="#008000" font-weight="bold" xml:space="preserve">string      </text>
+<text x="574.8" y="144.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">  </text>
+<text x="591.6" y="144.0" fill="#ffffff" font-weight="normal" xml:space="preserve">∞</text>
+<text x="12.0" y="161.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">  </text>
+<text x="28.8" y="161.0" fill="#ffffff" font-weight="normal" xml:space="preserve">hash:user:42                                       </text>
+<text x="457.2" y="161.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">  </text>
+<text x="474.0" y="161.0" fill="#008080" font-weight="normal" xml:space="preserve">hash        </text>
+<text x="574.8" y="161.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">  </text>
+<text x="591.6" y="161.0" fill="#8a8a8a" font-weight="normal" xml:space="preserve">∞</text>
+<text x="12.0" y="178.0" fill="#8a8a8a" font-weight="normal" xml:space="preserve">  </text>
+<text x="28.8" y="178.0" fill="#ffffff" font-weight="normal" xml:space="preserve">queue:tasks                                        </text>
+<text x="457.2" y="178.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">  </text>
+<text x="474.0" y="178.0" fill="#808000" font-weight="normal" xml:space="preserve">list        </text>
+<text x="574.8" y="178.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">  </text>
+<text x="591.6" y="178.0" fill="#8a8a8a" font-weight="normal" xml:space="preserve">∞</text>
+<text x="12.0" y="195.0" fill="#8a8a8a" font-weight="normal" xml:space="preserve">  </text>
+<text x="28.8" y="195.0" fill="#ffffff" font-weight="normal" xml:space="preserve">session:abc123                                     </text>
+<text x="457.2" y="195.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">  </text>
+<text x="474.0" y="195.0" fill="#008000" font-weight="normal" xml:space="preserve">string      </text>
+<text x="574.8" y="195.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">  </text>
+<text x="591.6" y="195.0" fill="#8a8a8a" font-weight="normal" xml:space="preserve">∞</text>
+<text x="12.0" y="212.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">  </text>
+<text x="28.8" y="212.0" fill="#ffffff" font-weight="normal" xml:space="preserve">set:tags                                           </text>
+<text x="457.2" y="212.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">  </text>
+<text x="474.0" y="212.0" fill="#000080" font-weight="normal" xml:space="preserve">set         </text>
+<text x="574.8" y="212.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">  </text>
+<text x="591.6" y="212.0" fill="#8a8a8a" font-weight="normal" xml:space="preserve">∞</text>
+<text x="12.0" y="229.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">  </text>
+<text x="28.8" y="229.0" fill="#ffffff" font-weight="normal" xml:space="preserve">user:1001:name                                     </text>
+<text x="457.2" y="229.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">  </text>
+<text x="474.0" y="229.0" fill="#008000" font-weight="normal" xml:space="preserve">string      </text>
+<text x="574.8" y="229.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">  </text>
+<text x="591.6" y="229.0" fill="#8a8a8a" font-weight="normal" xml:space="preserve">59m</text>
+<text x="12.0" y="246.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">  </text>
+<text x="28.8" y="246.0" fill="#ffffff" font-weight="normal" xml:space="preserve">zset:scores                                        </text>
+<text x="457.2" y="246.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">  </text>
+<text x="474.0" y="246.0" fill="#800080" font-weight="normal" xml:space="preserve">zset        </text>
+<text x="574.8" y="246.0" fill="#d4d4d4" font-weight="normal" xml:space="preserve">  </text>
+<text x="591.6" y="246.0" fill="#8a8a8a" font-weight="normal" xml:space="preserve">∞</text>
+<text x="12.0" y="569.0" fill="#8a8a8a" font-weight="normal" xml:space="preserve"> j/k nav   Enter view   / filter   s sort   r refresh   D db   esc disconnect   q quit</text>
+<text x="12.0" y="586.0" fill="#008000" font-weight="normal" xml:space="preserve"> connected</text>
+<text x="96.0" y="586.0" fill="#8a8a8a" font-weight="normal" xml:space="preserve">   db </text>
+<text x="146.4" y="586.0" fill="#00afff" font-weight="bold" xml:space="preserve">0</text>
+<text x="154.8" y="586.0" fill="#8a8a8a" font-weight="normal" xml:space="preserve">   </text>
+<text x="180.0" y="586.0" fill="#bcbcbc" font-weight="normal" xml:space="preserve">120x34</text>
+<text x="230.4" y="586.0" fill="#8a8a8a" font-weight="normal" xml:space="preserve">   </text>
+<text x="255.6" y="586.0" fill="#949494" font-weight="normal" xml:space="preserve">? help   q quit</text>
+</svg>

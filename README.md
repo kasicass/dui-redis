@@ -18,7 +18,9 @@ milestones M0–M7 are implemented. Highlights:
 - JSON syntax highlighting in the detail view
 - HashiCorp Vault credential resolution (KV v1/v2, dot selectors)
 - TLS via CLI/config; OSC 52 clipboard copy (`y`)
-- 143 EUnit tests; `./scripts/ci.sh` (compile → eunit → xref → dialyzer → edoc)
+- keyboard and mouse navigation (click a row to select it, wheel to scroll)
+- 144 EUnit tests + a Common Test suite; `./scripts/ci.sh`
+  (compile → eunit → ct → xref → dialyzer → edoc)
 
 Deferred: live Pub/Sub subscription stream and Keyspace Events; cluster-mode
 connection; Key Bindings customization UI; TLS certificate form.
@@ -81,6 +83,26 @@ Key screens:
 - **Key detail**: `e` edit, `a`/`x` add/remove item, `t` TTL, `R` rename,
   `c` copy, `y` copy to clipboard, `J` JSONPath, `d` delete.
 
+The list screens also respond to the mouse: click a row to select it and use
+the wheel to scroll.
+
+## Screenshots
+
+| Keys browser | Key detail |
+|---|---|
+| ![Keys browser](docs/screenshots/keys.svg) | ![Key detail](docs/screenshots/detail.svg) |
+
+| Live metrics | Memory stats |
+|---|---|
+| ![Live metrics](docs/screenshots/metrics.svg) | ![Memory stats](docs/screenshots/memory.svg) |
+
+| Help | Connections |
+|---|---|
+| ![Help](docs/screenshots/help.svg) | ![Connections](docs/screenshots/connections.svg) |
+
+Regenerate them with `./scripts/capture-screenshots.sh` (needs tmux, python3
+and a Redis reachable on localhost).
+
 ## CLI flags
 
 | Flag | Short | Description | Default |
@@ -107,18 +129,21 @@ src/
   dui_redis.erl          entry point (main/1, run/1)
   dui_redis_cli.erl      argparse-based CLI
   dui_redis_root.erl     root educkui component (init/event_to_msg/update/view)
+  dui_redis_mouse.erl    mouse layer: click/scroll into list selection
   dui_redis_state.erl    state record + pure transitions
   dui_redis_cmd.erl      async command factories
   dui_redis_config.erl   JSON persistence
   dui_redis_theme.erl    styles
   dui_redis_fmt.erl      formatting helpers
-test/                    EUnit tests
+test/                    EUnit tests + Common Test suite (dui_redis_SUITE)
 include/dui_redis.hrl    shared record/macros
+scripts/                 ci.sh, run.sh, capture-screenshots.sh, ansi2svg.py
 ```
 
 ## Test
 
 ```bash
-rebar3 eunit
-./scripts/ci.sh   # compile -> eunit -> xref -> dialyzer -> edoc
+rebar3 eunit      # unit tests
+rebar3 ct         # Common Test suite (live case skips if Redis is down)
+./scripts/ci.sh   # compile -> eunit -> ct -> xref -> dialyzer -> edoc
 ```

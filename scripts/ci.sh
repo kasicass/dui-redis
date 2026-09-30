@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dui-redis CI: compile -> eunit -> xref -> dialyzer -> edoc.
+# dui-redis CI: compile -> eunit -> common test -> xref -> dialyzer -> edoc.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -9,6 +9,9 @@ rebar3 compile
 
 echo "==> eunit"
 rebar3 eunit
+
+echo "==> ct"
+rebar3 ct
 
 echo "==> xref"
 rebar3 xref
