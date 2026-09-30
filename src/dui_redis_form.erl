@@ -211,8 +211,8 @@ to_connection(Form) ->
       name => maps:get(name, V, <<>>),
       host => maps:get(host, V, <<>>),
       port => int_or(maps:get(port, V, <<>>), 6379),
-      username => empty_to_undefined(maps:get(username, V, <<>>)),
-      password => empty_to_undefined(maps:get(password, V, <<>>)),
+      username => maps:get(username, V, <<>>),
+      password => maps:get(password, V, <<>>),
       db => int_or(maps:get(db, V, <<>>), 0),
       use_cluster => maps:get(cluster, V, false),
       use_tls => false}.
@@ -286,10 +286,6 @@ int_or(Value, Default) ->
         {ok, Int} -> Int;
         error -> Default
     end.
-
--spec empty_to_undefined(binary()) -> binary() | undefined.
-empty_to_undefined(<<>>) -> undefined;
-empty_to_undefined(V) -> V.
 
 -spec to_bin(term()) -> binary().
 to_bin(B) when is_binary(B) -> B;

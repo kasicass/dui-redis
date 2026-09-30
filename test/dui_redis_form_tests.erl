@@ -78,7 +78,8 @@ to_connection_test() ->
     ?assertEqual(6379, maps:get(port, Conn)),
     ?assertEqual(0, maps:get(db, Conn)),
     ?assertEqual(false, maps:get(use_cluster, Conn)),
-    ?assertEqual(undefined, maps:get(password, Conn)).
+    ?assertEqual(<<>>, maps:get(username, Conn)),
+    ?assertEqual(<<>>, maps:get(password, Conn)).
 
 set_error_clears_on_edit_test() ->
     F0 = dui_redis_form:set_error(<<"boom">>, dui_redis_form:new_add()),

@@ -384,7 +384,8 @@ update_group(Config, GroupName, Fun) ->
 
 -spec strip_connection(map()) -> map().
 strip_connection(Conn) when is_map(Conn) ->
-    maps:remove(password, Conn);
+    maps:filter(fun(_K, V) -> V =/= undefined end,
+                maps:remove(password, Conn));
 strip_connection(Conn) ->
     Conn.
 
@@ -410,17 +411,17 @@ normalize_connection(C) when is_map(C) ->
       name => value(<<"name">>, C, <<>>),
       host => value(<<"host">>, C, <<>>),
       port => value(<<"port">>, C, 6379),
-      username => value(<<"username">>, C, <<>>),
-      password => value(<<"password">>, C, <<>>),
+      username => opt(value(<<"username">>, C, <<>>)),
+      password => opt(value(<<"password">>, C, <<>>)),
       vault_path => value(<<"vault_path">>, C, <<>>),
       vault_username_key => value(<<"vault_username_key">>, C, <<>>),
       vault_password_key => value(<<"vault_password_key">>, C, <<>>),
       db => value(<<"db">>, C, 0),
       use_cluster => value(<<"use_cluster">>, C, false),
       use_tls => value(<<"use_tls">>, C, false),
-      tls_config => value(<<"tls_config">>, C, undefined),
-      created_at => value(<<"created_at">>, C, undefined),
-      updated_at => value(<<"updated_at">>, C, undefined)};
+      tls_config => opt(value(<<"tls_config">>, C, undefined)),
+      created_at => opt(value(<<"created_at">>, C, undefined)),
+      updated_at => opt(value(<<"updated_at">>, C, undefined))};
 normalize_connection(_C) ->
     #{}.
 
@@ -487,6 +488,12 @@ list_value(Key, Data, Default) ->
         L when is_list(L) -> L;
         _ -> Default
     end.
+
+%% @doc Normalizes the JSON round-trip of the atom `undefined' (encoded by
+%% `json:encode/1' as the string `"undefined"') back to `undefined'.
+-spec opt(term()) -> term().
+opt(<<"undefined">>) -> undefined;
+opt(V) -> V.
 
 -spec atom_key(binary()) -> atom() | undefined.
 atom_key(Key) ->
