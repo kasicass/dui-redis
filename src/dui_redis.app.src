@@ -1,0 +1,11 @@
+%% -*- erlang -*-
+{application, dui_redis, [
+    {description, "Redis TUI manager built with educkui"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {mod, {dui_redis_app, []}},
+    {applications, [kernel, stdlib, crypto, ssl, inets, educkui, eredis]},
+    {env, []},
+    {modules, []},
+    {licenses, ["MIT"]}
+]}.
