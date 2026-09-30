@@ -38,6 +38,8 @@ event_to_msg(#dui_event{type = key, key = Key, modifiers = Mods}, _State) ->
     {msg, {key, Key, Mods}};
 event_to_msg(#dui_event{type = custom, key = parent, content = Msg}, _State) ->
     {msg, Msg};
+event_to_msg(#dui_event{type = custom, key = message, content = {_Id, Msg}}, _State) ->
+    {msg, Msg};
 event_to_msg(#dui_event{type = custom, key = command_result,
                         content = {_ComponentId, Msg}}, _State) ->
     {msg, Msg};
@@ -1892,9 +1894,12 @@ view(State) ->
 
 -spec title_bar(#dui_state{}) -> #dui_node{}.
 title_bar(State) ->
-    Screen = screen_title(State),
     Version = list_to_binary(?DUI_REDIS_VERSION),
-    Text = <<" dui-redis ", Version/binary, "  |  ", Screen/binary>>,
+    Info = case dui_redis_state:current_conn(State) of
+        undefined -> screen_title(State);
+        Conn -> dui_redis_fmt:connection_label(Conn)
+    end,
+    Text = <<" dui-redis ", Version/binary, "  |  ", Info/binary>>,
     educkui_render_node:height(
         educkui_render_node:text(Text, dui_redis_theme:title()), 1).
 
@@ -1977,41 +1982,49 @@ connections_view(State) ->
 
 -spec list_widget([map()], #dui_state{}) -> #dui_node{}.
 list_widget(Conns, State) ->
-    Items = [conn_line(C) || C <- Conns],
-    Total = length(Items),
+    Total = length(Conns),
     Selected = min(dui_redis_state:selected(State), max(0, Total - 1)),
     {Rows, _} = dui_redis_state:size(State),
     Visible = max(1, Rows - 7),
     {Offset, _} = educkui_widget_list:visible_range(Total, Selected, Visible),
-    educkui_render_node:widget(educkui_widget_list, #{
-        items => Items,
-        selected => Selected,
-        offset => Offset,
-        style => educkui_style:new(),
-        selected_style => dui_redis_theme:selected()
-    }).
+    Window = lists:sublist(Conns, Offset + 1, Visible),
+    Lines = [conn_spans(C, Offset + I =:= Selected)
+             || {C, I} <- lists:zip(Window, lists:seq(0, length(Window) - 1))],
+    educkui_render_node:height(
+        educkui_render_node:widget(educkui_widget_text_view, #{lines => Lines}), Visible).
 
--spec conn_line(map()) -> binary().
-conn_line(Conn) ->
+-spec conn_spans(map(), boolean()) -> [{binary(), term()}].
+conn_spans(Conn, Selected) ->
     Name = to_bin(maps:get(name, Conn, <<>>)),
     Host = to_bin(maps:get(host, Conn, <<>>)),
-    Port = maps:get(port, Conn, 6379),
+    Port = integer_to_binary(maps:get(port, Conn, 6379)),
     Cluster = maps:get(use_cluster, Conn, false),
     Tls = maps:get(use_tls, Conn, false),
     Db = case Cluster of
         true -> <<>>;
-        false -> iolist_to_binary(io_lib:format("  db~b", [maps:get(db, Conn, 0)]))
+        false -> <<"  db", (integer_to_binary(maps:get(db, Conn, 0)))/binary>>
     end,
-    Badge = case Cluster of
-        true -> <<"  [CLUSTER]">>;
-        false -> <<>>
+    Badges = iolist_to_binary([
+        case Cluster of true -> <<"  [CLUSTER]">>; false -> <<>> end,
+        case Tls of true -> <<"  [TLS]">>; false -> <<>> end
+    ]),
+    Marker = case Selected of
+        true -> <<226, 151, 143, 32>>;   %% U+25CF filled circle
+        false -> <<226, 151, 139, 32>>   %% U+25CB hollow circle
     end,
-    TlsBadge = case Tls of
-        true -> <<"  [TLS]">>;
-        false -> <<>>
+    NameStyle = case Selected of
+        true -> dui_redis_theme:selected();
+        false -> dui_redis_theme:title()
     end,
-    iolist_to_binary(["  ", Name, "  ", Host, ":", integer_to_binary(Port),
-                      Db, Badge, TlsBadge]).
+    HostStyle = case Selected of
+        true -> dui_redis_theme:selected();
+        false -> dui_redis_theme:dim()
+    end,
+    [{Marker, NameStyle},
+     {Name, NameStyle},
+     {<<"  ", Host/binary, ":", Port/binary>>, HostStyle},
+     {Db, dui_redis_theme:meta_dim()},
+     {Badges, dui_redis_theme:success()}].
 
 %% -- connection form --------------------------------------------------------
 
@@ -2115,15 +2128,20 @@ detail_view(State) ->
     end,
     Name = to_bin(maps:get(key, KeyMap, <<>>)),
     Type = current_type(State),
-    Ttl = dui_redis_fmt:ttl_render(maps:get(ttl, KeyMap, -1)),
-    Meta = <<"  type: ", (dui_redis_preview:type_label(Type))/binary,
-             "   ttl: ", Ttl/binary>>,
+    TtlSeconds = maps:get(ttl, KeyMap, -1),
+    Ttl = dui_redis_fmt:ttl_render(TtlSeconds),
     {Rows, _} = dui_redis_state:size(State),
     Visible = max(1, Rows - 8),
     LineNodes = value_line_nodes(dui_redis_state:current_value(State), Visible, State),
+    MetaNode = educkui_render_node:widget(educkui_widget_text_view, #{lines => [[
+        {<<"  type: ">>, dui_redis_theme:dim()},
+        {dui_redis_preview:type_label(Type), dui_redis_theme:type_style_bold(Type)},
+        {<<"   ttl: ">>, dui_redis_theme:dim()},
+        {Ttl, dui_redis_theme:ttl_style(TtlSeconds)}
+    ]]}),
     educkui_render_node:stack(vertical, [
         educkui_render_node:text(<<" ", Name/binary>>, dui_redis_theme:title()),
-        educkui_render_node:text(Meta, dui_redis_theme:subtitle()),
+        MetaNode,
         educkui_render_node:text(<<>>)
         | LineNodes] ++
         [footer(<<" e edit   a add   x remove   t ttl   R rename   c copy   d delete   r refresh   esc back">>)
@@ -2628,64 +2646,122 @@ keys_view(State) ->
 
 -spec keys_panel(#dui_state{}, pos_integer()) -> #dui_node{}.
 keys_panel(State, Width) ->
-    Pattern = displayed_pattern(State),
-    FilterNode = case dui_redis_state:filter_active(State) of
-        true ->
-            educkui_render_node:text(<<" Filter: ", Pattern/binary, "_">>, dui_redis_theme:info());
-        false ->
-            educkui_render_node:text(<<" Filter: ", Pattern/binary>>, dui_redis_theme:subtitle())
-    end,
     {Rows, _} = dui_redis_state:size(State),
-    Visible = max(1, Rows - 6),
+    Visible = max(1, Rows - 9),
     Keys = dui_redis_state:keys(State),
     Total = length(Keys),
     Selected = min(dui_redis_state:selected_key(State), max(0, Total - 1)),
     {Offset, _} = educkui_widget_list:visible_range(Total, Selected, Visible),
     Window = lists:sublist(Keys, Offset + 1, Visible),
-    KeyW = max(10, Width - 26),
-    RowsData = [[display_name(K), dui_redis_preview:type_label(maps:get(type, K, string)),
-                 dui_redis_fmt:ttl_render(maps:get(ttl, K, -1))] || K <- Window],
-    Table = case RowsData of
+    TypeW = 12,
+    KeyW = max(20, Width - TypeW - 9),
+    TitleNode = educkui_render_node:text(keys_title(State), dui_redis_theme:title()),
+    FilterNode = educkui_render_node:widget(educkui_widget_text_view,
+        #{lines => [filter_spans(State)]}),
+    HeaderNode = educkui_render_node:text(header_line(KeyW, TypeW), dui_redis_theme:header()),
+    SepNode = educkui_render_node:text(
+        binary:copy(<<226, 148, 128>>, min(Width, 200)), dui_redis_theme:dim()),
+    ListNode = case Window of
         [] ->
             educkui_render_node:height(
                 educkui_render_node:text(<<"  No keys found.">>, dui_redis_theme:dim()),
-                Visible);
+                max(1, Visible));
         _ ->
+            Lines = [key_spans(K, Offset + I =:= Selected, KeyW, TypeW)
+                     || {K, I} <- lists:zip(Window, lists:seq(0, length(Window) - 1))],
             educkui_render_node:height(
-                educkui_render_node:widget(educkui_widget_table, #{
-                    header => [<<"Key">>, <<"Type">>, <<"TTL">>],
-                    rows => RowsData,
-                    widths => [KeyW, 11, 12],
-                    selected => Selected - Offset,
-                    style => educkui_style:new(),
-                    selected_style => dui_redis_theme:selected(),
-                    header_style => dui_redis_theme:subtitle()
-                }), Visible)
+                educkui_render_node:widget(educkui_widget_text_view, #{lines => Lines}),
+                max(1, Visible))
     end,
-    Count = iolist_to_binary(io_lib:format(" Keys ~b/~b", [Total, dui_redis_state:total_keys(State)])),
+    More = case dui_redis_state:key_cursor(State) of
+        0 -> [];
+        _ -> [educkui_render_node:text(<<"  ... l:more">>, dui_redis_theme:dim())]
+    end,
     educkui_render_node:stack(vertical, [
-        educkui_render_node:text(Count, dui_redis_theme:subtitle()),
+        TitleNode,
+        educkui_render_node:text(<<>>),
         FilterNode,
-        Table
+        educkui_render_node:text(<<>>),
+        HeaderNode,
+        SepNode,
+        ListNode
+        | More
     ]).
+
+-spec keys_title(#dui_state{}) -> binary().
+keys_title(State) ->
+    Conn = dui_redis_state:current_conn(State),
+    Name = case Conn of
+        undefined -> <<"Redis">>;
+        _ -> to_bin(maps:get(name, Conn, <<"Redis">>))
+    end,
+    Total = dui_redis_state:total_keys(State),
+    iolist_to_binary(io_lib:format("Keys - ~s  [Total: ~b]", [Name, Total])).
+
+-spec filter_spans(#dui_state{}) -> [{binary(), term()}].
+filter_spans(State) ->
+    Pattern = displayed_pattern(State),
+    Cursor = case dui_redis_state:filter_active(State) of
+        true -> <<"_">>;
+        false -> <<>>
+    end,
+    [{<<"Filter: ">>, dui_redis_theme:key_accent()},
+     {<<Pattern/binary, Cursor/binary>>, dui_redis_theme:normal()}].
+
+-spec header_line(pos_integer(), pos_integer()) -> binary().
+header_line(KeyW, TypeW) ->
+    <<"  ", (dui_redis_theme:pad(<<"Key">>, KeyW))/binary, "  ",
+      (dui_redis_theme:pad(<<"Type">>, TypeW))/binary, "  TTL">>.
+
+-spec key_spans(map(), boolean(), pos_integer(), pos_integer()) -> [{binary(), term()}].
+key_spans(K, Selected, KeyW, TypeW) ->
+    Name = dui_redis_theme:pad(display_name(K), KeyW),
+    Type = maps:get(type, K, string),
+    TypeBin = dui_redis_theme:pad(dui_redis_preview:type_label(Type), TypeW),
+    Ttl = dui_redis_fmt:ttl_render(maps:get(ttl, K, -1)),
+    case Selected of
+        true ->
+            [{<<226, 150, 182, 32>>, dui_redis_theme:selected()},
+             {Name, dui_redis_theme:selected()},
+             {<<"  ">>, undefined},
+             {TypeBin, dui_redis_theme:type_style_bold(Type)},
+             {<<"  ">>, undefined},
+             {Ttl, dui_redis_theme:normal()}];
+        false ->
+            [{<<"  ">>, undefined},
+             {Name, dui_redis_theme:normal()},
+             {<<"  ">>, undefined},
+             {TypeBin, dui_redis_theme:type_style(Type)},
+             {<<"  ">>, undefined},
+             {Ttl, dui_redis_theme:dim()}]
+    end.
 
 -spec preview_panel(#dui_state{}) -> #dui_node{}.
 preview_panel(State) ->
+    Border = dui_redis_theme:border(),
     case dui_redis_state:preview_value(State) of
         undefined ->
-            educkui_render_node:stack(vertical, [
-                educkui_render_node:text(<<" Preview">>, dui_redis_theme:subtitle()),
-                educkui_render_node:text(<<"  (select a key)">>, dui_redis_theme:dim())
-            ]);
+            educkui_render_node:widget(educkui_widget_text_view, #{lines => [
+                [{<<226,148,130,32>>, Border}, {<<"Preview">>, dui_redis_theme:title()}],
+                [{<<226,148,130,32>>, Border}, {<<"(select a key)">>, dui_redis_theme:dim()}]
+            ]});
         Value ->
             Summary = dui_redis_preview:summary(Value),
-            Lines = dui_redis_preview:lines(Value, 200),
-            educkui_render_node:stack(vertical, [
-                educkui_render_node:text(<<" Preview">>, dui_redis_theme:subtitle()),
-                educkui_render_node:text(<<"  ", Summary/binary>>, dui_redis_theme:info()),
-                educkui_render_node:text(<<>>)
-                | [educkui_render_node:text(<<"  ", Line/binary>>) || Line <- Lines]
-            ])
+            Type = maps:get(type, Value, string),
+            Body = case json_text(Value) of
+                {true, JsonText} ->
+                    [[{<<226,148,130,32>>, Border} | Spans]
+                     || Spans <- dui_redis_json:lines(JsonText)];
+                false ->
+                    [[{<<226,148,130,32>>, Border}, {L, dui_redis_theme:normal()}]
+                     || L <- dui_redis_preview:lines(Value, 200)]
+            end,
+            educkui_render_node:widget(educkui_widget_text_view, #{lines => [
+                [{<<226,148,130,32>>, Border}, {<<"Preview">>, dui_redis_theme:title()}],
+                [{<<226,148,130,32>>, Border}, {Summary, dui_redis_theme:type_style_bold(Type)}],
+                [{<<226,148,130>>, Border}]
+                | Body
+            ]})
     end.
 
 -spec switch_db_view(#dui_state{}) -> #dui_node{}.

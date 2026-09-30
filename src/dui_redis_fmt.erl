@@ -50,12 +50,14 @@ ttl(0) ->
 ttl(Ttl) ->
     iolist_to_binary(io_lib:format("~pms", [Ttl])).
 
-%% @doc Formats a Redis TTL in seconds for display.
+%% @doc Formats a Redis TTL in seconds for display (redis-tui style).
 -spec ttl_render(integer()) -> binary().
-ttl_render(-1) -> <<"no expiry">>;
-ttl_render(-2) -> <<"expired">>;
-ttl_render(S) when S > 0 -> <<(integer_to_binary(S))/binary, "s">>;
-ttl_render(_) -> <<>>.
+ttl_render(-1) -> <<226, 136, 158>>;   %% U+221E infinity
+ttl_render(-2) -> <<"exp">>;
+ttl_render(S) when is_integer(S), S > 0, S < 60 -> <<(integer_to_binary(S))/binary, "s">>;
+ttl_render(S) when is_integer(S), S > 0, S < 3600 -> <<(integer_to_binary(S div 60))/binary, "m">>;
+ttl_render(S) when is_integer(S), S > 0 -> <<(integer_to_binary(S div 3600))/binary, "h">>;
+ttl_render(_) -> <<226, 136, 158>>.
 
 %% @doc Formats a duration in seconds as e.g. `1d 2h 3m'.
 -spec duration(non_neg_integer()) -> binary().
@@ -101,6 +103,7 @@ connection_label(Conn) ->
     HostPort = <<Host/binary, ":", (integer_to_binary(Port))/binary>>,
     case Name of
         <<>> -> HostPort;
+        HostPort -> HostPort;
         _ -> <<Name/binary, " (", HostPort/binary, ")">>
     end.
 
