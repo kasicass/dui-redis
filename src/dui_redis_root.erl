@@ -1961,7 +1961,7 @@ screen_view(_State) ->
 -spec connections_view(#dui_state{}) -> #dui_node{}.
 connections_view(State) ->
     Conns = dui_redis_state:connections(State),
-    Header = iolist_to_binary(io_lib:format(" Saved Connections (~b)", [length(Conns)])),
+    Header = iolist_to_binary(io_lib:format("Saved Connections (~b)", [length(Conns)])),
     Body = case Conns of
         [] ->
             educkui_render_node:text(
@@ -1975,10 +1975,41 @@ connections_view(State) ->
         Error -> [educkui_render_node:text(<<"  Connection failed: ", Error/binary>>,
                                            dui_redis_theme:error())]
     end,
-    educkui_render_node:stack(vertical, [
-        educkui_render_node:text(Header, dui_redis_theme:subtitle())
-        | ErrorNodes ++ [Body, footer(connection_hints())]
-    ]).
+    LogoNodes = [educkui_render_node:text(L, dui_redis_theme:logo())
+                 || L <- logo_lines()],
+    StatsNode = educkui_render_node:widget(educkui_widget_text_view,
+        #{lines => [stats_spans(State, length(Conns))]}),
+    educkui_render_node:stack(vertical,
+        LogoNodes ++
+        [educkui_render_node:text(<<>>), StatsNode, educkui_render_node:text(<<>>),
+         educkui_render_node:text(Header, dui_redis_theme:title())]
+        ++ ErrorNodes ++ [Body, footer(connection_hints())]).
+
+-spec logo_lines() -> [binary()].
+logo_lines() ->
+    [<<"  ____  _____ ____  ___ ____">>,
+     <<" |  _ ", 92, "| ____|  _ ", 92, "|_ _/ ___|">>,
+     <<" | | | |  _| | | | || |", 92, "___ ", 92>>,
+     <<" | |_| | |___| |_| || | ___) |">>,
+     <<" |____/|_____|____/|___|____/">>].
+
+-spec stats_spans(#dui_state{}, non_neg_integer()) -> [{binary(), term()}].
+stats_spans(State, Count) ->
+    Db = case dui_redis_state:current_conn(State) of
+        undefined -> 0;
+        Conn -> maps:get(db, Conn, 0)
+    end,
+    Status = case dui_redis_state:connected(State) of
+        true -> {<<"connected">>, dui_redis_theme:success()};
+        false -> {<<"disconnected">>, dui_redis_theme:dim()}
+    end,
+    [{<<"  Connections: ">>, dui_redis_theme:dim()},
+     {integer_to_binary(Count), dui_redis_theme:title()},
+     {<<" saved">>, dui_redis_theme:dim()},
+     {<<"    DB: ">>, dui_redis_theme:dim()},
+     {integer_to_binary(Db), dui_redis_theme:title()},
+     {<<"    Status: ">>, dui_redis_theme:dim()},
+     Status].
 
 -spec list_widget([map()], #dui_state{}) -> #dui_node{}.
 list_widget(Conns, State) ->

@@ -13,6 +13,7 @@
     normal/0,
     selected/0,
     key_accent/0,
+    logo/0,
     info/0,
     success/0,
     error/0,
@@ -45,6 +46,10 @@ selected() -> educkui_style:from([{fg, 16}, {bg, 39}, {bold, true}]).
 %% @doc Accent used for the "Filter:" label and other keys.
 -spec key_accent() -> #dui_style{}.
 key_accent() -> educkui_style:from([{fg, 6}, {bold, true}]).
+
+%% @doc The connections-screen logo (red bold, like redis-tui).
+-spec logo() -> #dui_style{}.
+logo() -> educkui_style:from([{fg, 196}, {bold, true}]).
 
 -spec info() -> #dui_style{}.
 info() -> educkui_style:from([{fg, 39}]).
